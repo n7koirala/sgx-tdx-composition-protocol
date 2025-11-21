@@ -1,0 +1,216 @@
+{
+  "timestamp": "2025-11-20T21:11:22.148160",
+  "analysis": {
+    "token_fields": {
+      "total_attestations": 10,
+      "linkable_fields": [
+        {
+          "field": "tdx_mrtd",
+          "description": "TD Measurement (VM-specific, OK to keep)",
+          "status": "IDENTICAL across all attestations",
+          "value_preview": "a5844e88897b70c318bef929ef4dfd6c7304c52c...",
+          "risk": "MEDIUM"
+        },
+        {
+          "field": "tdx_mrseam",
+          "description": "SEAM Module Measurement",
+          "status": "IDENTICAL across all attestations",
+          "value_preview": "bfb360ac8e6233a1bca1433caf7382d95c165b4a...",
+          "risk": "MEDIUM"
+        },
+        {
+          "field": "tdx_rtmr0",
+          "description": "Runtime Measurement Register 0",
+          "status": "IDENTICAL across all attestations",
+          "value_preview": "cdd12631746b633b87592779e3118c959c8d9e30...",
+          "risk": "MEDIUM"
+        },
+        {
+          "field": "tdx_rtmr1",
+          "description": "Runtime Measurement Register 1",
+          "status": "IDENTICAL across all attestations",
+          "value_preview": "160767baf7423a37bcfbc903877d36c174831818...",
+          "risk": "MEDIUM"
+        },
+        {
+          "field": "attester_tcb_status",
+          "description": "TCB Status",
+          "status": "IDENTICAL across all attestations",
+          "value_preview": "OutOfDate...",
+          "risk": "HIGH"
+        },
+        {
+          "field": "attester_tcb_date",
+          "description": "TCB Date",
+          "status": "IDENTICAL across all attestations",
+          "value_preview": "2025-05-14T00:00:00Z...",
+          "risk": "HIGH"
+        },
+        {
+          "field": "tdx_collateral.fmspc",
+          "description": "Platform TCB Collateral",
+          "status": "IDENTICAL - PLATFORM LINKABLE!",
+          "value_preview": "00806F050000...",
+          "risk": "CRITICAL"
+        },
+        {
+          "field": "tdx_collateral.qeidcerthash",
+          "description": "Platform TCB Collateral",
+          "status": "IDENTICAL - PLATFORM LINKABLE!",
+          "value_preview": "c550544e4442d9be583a5eddd48df8ba0149ddee...",
+          "risk": "CRITICAL"
+        },
+        {
+          "field": "tdx_collateral.qeidcrlhash",
+          "description": "Platform TCB Collateral",
+          "status": "IDENTICAL - PLATFORM LINKABLE!",
+          "value_preview": "807f576950dcf1a807ae59e0ba8eac19664ec398...",
+          "risk": "CRITICAL"
+        },
+        {
+          "field": "tdx_collateral.qeidhash",
+          "description": "Platform TCB Collateral",
+          "status": "IDENTICAL - PLATFORM LINKABLE!",
+          "value_preview": "e62195c145c932bad567d9ca1762b8525e07a26d...",
+          "risk": "CRITICAL"
+        },
+        {
+          "field": "tdx_collateral.tcbevaluationdatanumber",
+          "description": "Platform TCB Collateral",
+          "status": "IDENTICAL - PLATFORM LINKABLE!",
+          "value_preview": "20...",
+          "risk": "CRITICAL"
+        },
+        {
+          "field": "tdx_collateral.tcbinfocerthash",
+          "description": "Platform TCB Collateral",
+          "status": "IDENTICAL - PLATFORM LINKABLE!",
+          "value_preview": "c550544e4442d9be583a5eddd48df8ba0149ddee...",
+          "risk": "CRITICAL"
+        },
+        {
+          "field": "tdx_collateral.tcbinfocrlhash",
+          "description": "Platform TCB Collateral",
+          "status": "IDENTICAL - PLATFORM LINKABLE!",
+          "value_preview": "807f576950dcf1a807ae59e0ba8eac19664ec398...",
+          "risk": "CRITICAL"
+        },
+        {
+          "field": "tdx_collateral.tcbinfohash",
+          "description": "Platform TCB Collateral",
+          "status": "IDENTICAL - PLATFORM LINKABLE!",
+          "value_preview": "bf9a00b50aca5225e693fead2555958cd78b5211...",
+          "risk": "CRITICAL"
+        },
+        {
+          "field": "attester_advisory_ids",
+          "description": "Platform Security Advisories",
+          "status": "IDENTICAL - reveals platform patch level",
+          "risk": "HIGH"
+        }
+      ],
+      "variable_fields": [],
+      "privacy_concerns": [
+        {
+          "concern": "Platform Configuration Key (PCK)",
+          "description": "Embedded in TCB collateral - uniquely identifies platform",
+          "mitigation": "Use group signatures or anonymous credentials",
+          "severity": "CRITICAL"
+        },
+        {
+          "concern": "FMSPC (Family-Model-Stepping-Platform-Custom SKU)",
+          "description": "Identifies the platform family and configuration",
+          "mitigation": "Anonymize via k-anonymity or zero-knowledge proofs",
+          "severity": "HIGH"
+        },
+        {
+          "concern": "TCB Information Hashes",
+          "description": "QE, TCBInfo hashes can link attestations to same platform",
+          "mitigation": "Your hierarchical protocol should mask these",
+          "severity": "HIGH"
+        },
+        {
+          "concern": "Security Version Numbers",
+          "description": "Reveals exact microcode/firmware versions",
+          "mitigation": "Generalize to version ranges",
+          "severity": "MEDIUM"
+        }
+      ]
+    },
+    "platform_identifiers": {
+      "platform_specific": {
+        "FMSPC": "00806F050000",
+        "QE_ID_Hash": "e62195c145c932ba...",
+        "TCB_Eval_Number": 20,
+        "TCB_Status": "OutOfDate",
+        "TCB_Date": "2025-05-14T00:00:00Z",
+        "Advisory_IDs": [
+          "INTEL-SA-01192",
+          "INTEL-SA-01245",
+          "INTEL-SA-01312",
+          "INTEL-SA-01313"
+        ]
+      },
+      "td_specific": {
+        "MRTD": "a5844e88897b70c3...",
+        "RTMR0": "cdd12631746b633b...",
+        "RTMR1": "160767baf7423a37..."
+      },
+      "note": "Platform-specific fields enable linkability"
+    },
+    "linkability_attack": {
+      "attack_type": "Token Fingerprinting Attack",
+      "method": "Compare platform-specific fields across attestations",
+      "linkable_attestations": 9,
+      "fingerprints": {
+        "7be79529765ff8e6": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ]
+      },
+      "success": true,
+      "implications": [
+        "\u2717 Platform can be tracked across 10 attestations",
+        "\u2717 Only 1 unique fingerprints found",
+        "\u2717 User privacy is compromised",
+        "\u2717 Can build profile of VM usage patterns",
+        "\u2713 Your hierarchical protocol MUST prevent this"
+      ]
+    },
+    "recommendations": [
+      "PROTOCOL DESIGN RECOMMENDATIONS:",
+      "",
+      "1. ANONYMIZE Platform-Specific Fields:",
+      "   - FMSPC: Use k-anonymity or group into families",
+      "   - TCB collateral hashes: Replace with range proofs",
+      "   - Advisory IDs: Generalize to minimum required set",
+      "",
+      "2. PRESERVE TD-Specific Fields:",
+      "   - MRTD: Keep as-is (VM-specific, not platform-linkable)",
+      "   - RTMRs: Keep as-is (runtime measurements)",
+      "",
+      "3. HIERARCHICAL COMPOSITION:",
+      "   - SGX layer: Attests to application/enclave",
+      "   - TDX layer: Attests to VM, but anonymizes platform",
+      "   - Composition proof: Binds layers without leaking platform ID",
+      "",
+      "4. CRYPTOGRAPHIC TECHNIQUES:",
+      "   - Group signatures for platform anonymity",
+      "   - Zero-knowledge proofs for TCB compliance",
+      "   - Blind signatures for attestation tokens",
+      "",
+      "5. VERIFICATION STRATEGY:",
+      "   - Verifier checks: TD measurements, security properties",
+      "   - Verifier does NOT learn: Platform ID, exact TCB versions",
+      "   - Privacy-preserving verification of TCB compliance"
+    ]
+  }
+}

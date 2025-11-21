@@ -1,0 +1,25 @@
+================================================================================
+TDX BASELINE SUMMARY TABLE
+================================================================================
+
+PERFORMANCE METRICS
+--------------------------------------------------------------------------------
+Local TDX Evidence Collection                        226.19 ms
+Full TDX Attestation (with ITA)                      407.30 ms
+
+LINKABILITY ANALYSIS
+--------------------------------------------------------------------------------
+Total Linkable Fields: 15
+  CRITICAL       :   8 fields
+  HIGH           :   3 fields
+  MEDIUM         :   4 fields
+
+REMOTE ATTESTATION
+--------------------------------------------------------------------------------
+Success Rate: 10/10 (100.0%)
+Mean Total Latency: 410.83 ms
+  Generation:  410.24 ms
+  Network:     0.58 ms
+  Verification: 0.11 ms
+
+================================================================================

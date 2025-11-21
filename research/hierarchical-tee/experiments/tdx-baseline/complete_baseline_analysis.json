@@ -1,0 +1,35 @@
+{
+  "timestamp": "2025-11-21T22:54:49.874136",
+  "sgx_baseline": {
+    "ereport_ms": 0.01,
+    "quote_generation_ms": 5.546,
+    "total_ms": 5.557,
+    "quote_size_bytes": 1456,
+    "success_rate": 1.0
+  },
+  "tdx_baseline": {
+    "evidence_collection_ms": 199.75,
+    "full_attestation_ms": 344.18,
+    "network_overhead_ms": 144.43,
+    "token_size_bytes": 5934,
+    "evidence_size_bytes": 11469,
+    "header_bytes": 248,
+    "payload_bytes": 5172,
+    "signature_bytes": 512
+  },
+  "hierarchical_protocol": {
+    "sgx_layer_ms": 5.557,
+    "tdx_layer_ms": 199.75,
+    "network_sgx_tdx_ms": 2.0,
+    "binding_overhead_ms": 1.0,
+    "total_ms": 208.307,
+    "overhead_vs_tdx_pct": 4.283854818523148
+  },
+  "analysis": {
+    "speedup_factor": 35.94565412992622,
+    "size_ratio": 4.075549450549451,
+    "overhead_percent": 4.283854818523148,
+    "budget_50pct_ms": 91.31800000000001,
+    "budget_100pct_ms": 191.193
+  }
+}

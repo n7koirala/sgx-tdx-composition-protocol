@@ -1,0 +1,83 @@
+{
+  "header": {
+    "alg": "PS384",
+    "jku": "https://portal.trustauthority.intel.com/certs",
+    "kid": "d1554e0aa2e9eb86e77f41e24759e7712ed424b365ff20a22ad1c2e3c7c60455ac67ae6c2e7b256f7b768009ab88081b",
+    "typ": "JWT"
+  },
+  "payload": {
+    "appraisal": {
+      "method": "default",
+      "ver": 2
+    },
+    "eat_profile": "https://portal.trustauthority.intel.com/eat_profile.html",
+    "intuse": "generic",
+    "tdx": {
+      "attester_advisory_ids": [
+        "INTEL-SA-01192",
+        "INTEL-SA-01245",
+        "INTEL-SA-01312",
+        "INTEL-SA-01313"
+      ],
+      "attester_tcb_date": "2025-05-14T00:00:00Z",
+      "attester_tcb_status": "OutOfDate",
+      "attester_type": "TDX",
+      "dbgstat": "disabled",
+      "pce_svn": 11,
+      "sgx_tcb_comp_svn": "08080202040100060000000000000000",
+      "tdx_collateral": {
+        "fmspc": "00806F050000",
+        "qeidcerthash": "c550544e4442d9be583a5eddd48df8ba0149ddeef40efd3737ebe0f885dc3711",
+        "qeidcrlhash": "807f576950dcf1a807ae59e0ba8eac19664ec39896c1fe2de5cc8a9cc9d3375f",
+        "qeidhash": "e62195c145c932bad567d9ca1762b8525e07a26de8b42089497106fee0b83709",
+        "quotehash": "4ac747d8507bc764e2e980b6d6809b6351c9dc5187e62642910a93f96f2570c4",
+        "tcbevaluationdatanumber": 20,
+        "tcbinfocerthash": "c550544e4442d9be583a5eddd48df8ba0149ddeef40efd3737ebe0f885dc3711",
+        "tcbinfocrlhash": "807f576950dcf1a807ae59e0ba8eac19664ec39896c1fe2de5cc8a9cc9d3375f",
+        "tcbinfohash": "bf9a00b50aca5225e693fead2555958cd78b52112f40378086d77c2ac5d973c9"
+      },
+      "tdx_is_debuggable": false,
+      "tdx_mrconfigid": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "tdx_mrowner": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "tdx_mrownerconfig": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "tdx_mrseam": "bfb360ac8e6233a1bca1433caf7382d95c165b4a77fb00bf1435e5a08f300cdfead5ee68461afd9b6c728dce7534602d",
+      "tdx_mrsignerseam": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "tdx_mrtd": "a5844e88897b70c318bef929ef4dfd6c7304c52c4bc9c3f39132f0fdccecf3eb5bab70110ee42a12509a31c037288694",
+      "tdx_report_data": "b83bd19449997ea929f8408012f0cfbaec6f00b149b5a319907eb604f1336f3ac725f685005c1f0d00e27091570cd234ec1a5d9b998f846d758abc5ba0153f48",
+      "tdx_rtmr0": "cdd12631746b633b87592779e3118c959c8d9e306792ba9ad960fa5eec05f286d765bcbeecf397ec57cc3c626a2292c7",
+      "tdx_rtmr1": "160767baf7423a37bcfbc903877d36c174831818b56aed335b99495a583b1dfa31eaef8f04da3f5d8c1e1fcc5f3a7c13",
+      "tdx_rtmr2": "e15c1f9405e798aac695b93690ad84be7877c189201ae019989171199514a2b2fc1fa11d3461b5a79e9997a36f19abcd",
+      "tdx_rtmr3": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "tdx_seam_attributes": "0000000000000000",
+      "tdx_seamsvn": 264,
+      "tdx_td_attributes": "0000001000000000",
+      "tdx_td_attributes_debug": false,
+      "tdx_td_attributes_key_locker": false,
+      "tdx_td_attributes_perfmon": false,
+      "tdx_td_attributes_protection_keys": false,
+      "tdx_td_attributes_septve_disable": true,
+      "tdx_tee_tcb_svn": "08010800000000000000000000000000",
+      "tdx_xfam": "e700060000000000",
+      "verifier_nonce": {
+        "iat": "MjAyNS0xMS0yMCAxODoxNjoyNSArMDAwMCBVVEM=",
+        "signature": "OOhrAYSUz9+I6imziaVJZeM4zQGh3rrPzTfsZsfmdI3rG4vlBDIsQVLxyJAD0QjFdsbYfb8+1sPeKSuT+QMv7TIAbqfKfu8Kvn0iHlOZGhi35n4E0Yi6EzQRl7B5tm72HFmhqBH3D9X0KwB97gVL/6LdQfyX6xZaBK1975dqcwrfHbmPVMYgFAetQh4Z7FS6GBdsHhbyA1iL8jOKM/DcSBVztnxU8HEYX9ttFXoiNIAl0RcWoiY+y0CMG/vN+qswwCBGUejZYOiNZ0izp+GPJDVTC2xv+TVvtcm6RkTbqeXdi6ItmWZ+9iEw54VhVfTyA+yky9UX+S/iAP8KJ46M9oRb7gjGqxtvZ/AxSEPEKRII/ZJlLDJHIm4p9XavXwd1Ce3sFH4DbXsKsc0FjLoTXroSwLvHjatdRYnEnhvWAuc2vFVSsd4//bJAV01z0q+xQ5splbso8RHzPVF3XwuzNGC1DqZYdy4ndil7aVHEq6wla0OtTGaao7Y0t7oiu9I3",
+        "val": "Tkl3WnRoWVpsVU5CRWhJYmRxYnlZTWlPZEtIQ2hUVTFyeHlVVnl2blVOZjdqUStXSHhKcEJ0b2Q3bmFOSkRwazB3T2haNktYK1gzbUJkUjFzK252Y2c9PQ=="
+      }
+    },
+    "ver": "2.0.0",
+    "verifier_instance_ids": [
+      "5c3b9963-23bf-4b55-9b10-2c23aee69ef3",
+      "ad576941-5f1f-4113-bf4b-26d2b8326a98",
+      "fc0e0167-1815-460a-9a4c-85b265a22a83",
+      "d7da78c2-69f0-4791-a129-110480cc03be",
+      "d38c88de-f78d-4e13-a6af-0e160537451e",
+      "4476c026-52ab-44ed-9710-e4fbed5c976c"
+    ],
+    "exp": 1763662885,
+    "jti": "b50bb9ac-cffb-4c4d-833e-4f43c49150ba",
+    "iat": 1763662585,
+    "iss": "https://portal.trustauthority.intel.com",
+    "nbf": 1763662585
+  },
+  "signature": "LJIUcL2JaebyYSXMu4jRK3K-T4zHHpZnpl0AIf0ln_qrfwengn..."
+}

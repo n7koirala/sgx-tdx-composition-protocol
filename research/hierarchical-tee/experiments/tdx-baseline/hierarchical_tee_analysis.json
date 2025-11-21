@@ -1,0 +1,31 @@
+{
+  "sgx_baseline": {
+    "ereport_ms": 0.014,
+    "quote_prep_ms": 0.007,
+    "combined_ms": 0.021,
+    "enclave_creation_ms": 23.898,
+    "throughput": 70828.29
+  },
+  "tdx_baseline": {
+    "evidence_collection_ms": 199.75,
+    "full_attestation_ms": 344.18,
+    "network_overhead_ms": 144.43,
+    "token_size_bytes": 5934,
+    "header_bytes": 248,
+    "payload_bytes": 5172,
+    "signature_bytes": 512
+  },
+  "hierarchical_estimates": {
+    "sgx_layer_ms": 0.021,
+    "tdx_layer_ms": 199.75,
+    "network_ms": 2.0,
+    "binding_ms": 1.0,
+    "total_without_anon_ms": 202.771,
+    "overhead_percent_no_anon": 1.5123904881101309,
+    "anonymization_budget_50pct_ms": 96.85400000000001,
+    "anonymization_budget_100pct_ms": 196.729,
+    "projected_total_with_anon_ms": 212.771,
+    "projected_overhead_percent": 6.518648310387978
+  },
+  "timestamp": "2025-11-21T22:16:21.972912"
+}

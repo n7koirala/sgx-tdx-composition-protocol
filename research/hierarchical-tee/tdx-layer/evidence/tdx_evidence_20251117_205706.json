@@ -1,0 +1,34 @@
+{
+  "system_info": {
+    "timestamp": "2025-11-17T20:57:06.600764",
+    "kernel": "6.14.0-1017-gcp",
+    "cpu_info": {
+      "model": "InteTD X   l"
+    }
+  },
+  "tdx_device": {
+    "available": true,
+    "device": "/dev/tdx_guest",
+    "permissions": "0o20600",
+    "major": 10,
+    "minor": 121
+  },
+  "tdx_features": {
+    "encryption_active": true,
+    "tdx_module_loaded": false,
+    "messages": [
+      "[    0.000000] tdx: Guest detected",
+      "[    0.000000] tdx: Attributes: SEPT_VE_DISABLE",
+      "[    0.000000] tdx: TD_CTLS: PENDING_VE_DISABLE ENUM_TOPOLOGY VIRT_CPUID2 REDUCE_VE",
+      "[    1.493503] process: using TDX aware idle routine",
+      "[    1.493503] Memory Encryption Features active: Intel TDX",
+      "[    3.926185] systemd[1]: Detected confidential virtualization tdx."
+    ]
+  },
+  "cpu_features": {
+    "tdx_flags": [
+      "tdx_guest"
+    ],
+    "total_flags": 116
+  }
+}

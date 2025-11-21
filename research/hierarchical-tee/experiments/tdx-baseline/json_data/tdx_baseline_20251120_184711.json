@@ -1,0 +1,56 @@
+{
+  "timestamp": "2025-11-20T18:46:29.771691",
+  "platform": "Google Cloud C3 with Intel TDX",
+  "benchmarks": [
+    {
+      "operation": "TDX Report Generation (Hardware Only)",
+      "error": "get_tdx_report program not found",
+      "note": "Run the C program compilation from earlier steps"
+    },
+    {
+      "operation": "Local TDX Evidence Collection",
+      "iterations": 16,
+      "successes": 16,
+      "failures": 34,
+      "mean_ms": 225.0177018127033,
+      "median_ms": 211.60753200001636,
+      "stdev_ms": 59.81272894287525,
+      "min_ms": 197.61401700088754,
+      "max_ms": 448.1834369998978,
+      "p95_ms": 448.1834369998978,
+      "p99_ms": 448.1834369998978
+    },
+    {
+      "operation": "Full TDX Attestation (with ITA)",
+      "iterations": 19,
+      "successes": 19,
+      "mean_ms": 400.4006532106455,
+      "median_ms": 394.7125100003177,
+      "stdev_ms": 20.261694823107376,
+      "min_ms": 376.5845040015847,
+      "max_ms": 434.27299199902336,
+      "p95_ms": 434.27299199902336,
+      "p99_ms": 434.27299199902336,
+      "token_size_bytes": {
+        "mean": 5934,
+        "median": 5934,
+        "min": 5934,
+        "max": 5934
+      }
+    },
+    {
+      "operation": "TDX Evidence and Token Sizes",
+      "evidence_raw_output_bytes": 11469,
+      "token_jwt_bytes": 5934,
+      "token_header_bytes": 248,
+      "token_payload_bytes": 5172,
+      "token_signature_bytes": 512
+    },
+    {
+      "operation": "Attestation Phase Breakdown",
+      "evidence_collection_mean_ms": 205.03278419964772,
+      "full_attestation_mean_ms": 420.8937587998662,
+      "network_verification_overhead_ms": 215.86097460021847
+    }
+  ]
+}
