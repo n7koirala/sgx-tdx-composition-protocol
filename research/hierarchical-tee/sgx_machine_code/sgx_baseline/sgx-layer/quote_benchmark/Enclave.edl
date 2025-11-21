@@ -1,0 +1,13 @@
+enclave {
+    trusted {
+        /* Generate EREPORT for quote */
+        public int ecall_generate_report_for_quote(
+            [out, size=report_size] uint8_t *report_data,
+            size_t report_size,
+            [in, size=target_info_size] uint8_t *target_info,
+            size_t target_info_size,
+            [in, size=report_data_size] uint8_t *custom_report_data,
+            size_t report_data_size
+        );
+    };
+};

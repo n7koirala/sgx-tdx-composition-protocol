@@ -1,0 +1,19 @@
+enclave {
+    trusted {
+        /* Generate EREPORT (local attestation) */
+        public int ecall_generate_report(
+            [out, size=report_size] uint8_t *report_data,
+            size_t report_size,
+            [in, size=64] uint8_t *custom_data
+        );
+        
+        /* Prepare data for quote (remote attestation) */
+        public int ecall_prepare_quote_data(
+            [out, size=64] uint8_t *report_data
+        );
+    };
+    
+    untrusted {
+        /* Placeholder for OCALLs if needed */
+    };
+};
