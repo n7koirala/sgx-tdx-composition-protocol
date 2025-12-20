@@ -1,0 +1,122 @@
+# Gramine Manifest Template for SGX Remote Attestation Demo
+#
+# This manifest configures how Python runs inside an SGX enclave with
+# remote attestation (DCAP) enabled.
+#
+# Compatible with Gramine 1.9+
+
+# Gramine libos entrypoint - the Python interpreter
+libos.entrypoint = "{{ python_path }}"
+
+# Loader configuration
+loader.log_level = "{{ log_level }}"
+
+# Pass command line arguments (the Python script to run)
+loader.insecure__use_cmdline_argv = true
+
+# Environment variables
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/{{ arch_libdir }}"
+loader.env.PATH = "/bin:/usr/bin"
+loader.env.HOME = "/home/user"
+loader.env.RUN_BENCHMARK = { passthrough = true }
+
+# ============================================================================
+# Filesystem Mounts
+# ============================================================================
+
+fs.mounts = [
+    # Gramine runtime libraries
+    { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+    
+    # System libraries
+    { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+    { path = "/usr/{{ arch_libdir }}", uri = "file:/usr/{{ arch_libdir }}" },
+    { path = "/usr/lib", uri = "file:/usr/lib" },
+    
+    # Python installation
+    { path = "{{ python_path }}", uri = "file:{{ python_path }}" },
+    { path = "/usr/lib/python{{ python_version }}", uri = "file:/usr/lib/python{{ python_version }}" },
+    { path = "/usr/lib/python3/dist-packages", uri = "file:/usr/lib/python3/dist-packages" },
+    { path = "/usr/lib/python3", uri = "file:/usr/lib/python3" },
+    
+    # System config files
+    { path = "/etc", uri = "file:/etc" },
+    
+    # Working directory for the script
+    { path = "/app", uri = "file:." },
+    
+    # Temporary filesystem
+    { type = "tmpfs", path = "/tmp" },
+]
+
+# ============================================================================
+# SGX-specific configuration
+# ============================================================================
+
+# Enable SGX remote attestation using DCAP
+sgx.remote_attestation = "dcap"
+
+# Debug mode (set to false in production!)
+sgx.debug = true
+
+# Enclave size - Python needs substantial memory
+sgx.enclave_size = "1G"
+
+# Maximum number of threads
+sgx.max_threads = 32
+
+# ISV configuration (for attestation identity)
+# In production, set these to appropriate values
+sgx.isvprodid = 0
+sgx.isvsvn = 0
+
+# Enable EDMM if available (reduces initial memory footprint)
+# sgx.edmm_enable = true
+
+# ============================================================================
+# Trusted Files - files that are measured and included in MRENCLAVE
+# ============================================================================
+
+sgx.trusted_files = [
+    "file:{{ python_path }}",
+    "file:{{ gramine.runtimedir() }}/",
+    "file:{{ arch_libdir }}/",
+    "file:/usr/{{ arch_libdir }}/",
+    "file:/usr/lib/python{{ python_version }}/",
+    "file:/usr/lib/python3/dist-packages/",
+    "file:/usr/lib/python3/",
+    "file:attestation_demo.py",
+]
+
+# ============================================================================
+# Allowed Files - files that can be accessed but are NOT measured
+# ============================================================================
+
+sgx.allowed_files = [
+    # Allow reading system config
+    "file:/etc/nsswitch.conf",
+    "file:/etc/host.conf",
+    "file:/etc/resolv.conf",
+    "file:/etc/hosts",
+    "file:/etc/localtime",
+    "file:/etc/ssl/certs/",
+    "file:/etc/passwd",
+    "file:/etc/group",
+    "file:/etc/gai.conf",
+    
+    # Allow writing output files (current directory)
+    "file:quote.bin",
+]
+
+# ============================================================================
+# System settings
+# ============================================================================
+
+# Increase stack size for Python
+sys.stack.size = "2M"
+
+# Allow SIGTERM injection
+sys.enable_sigterm_injection = true
+
+# Enable extra runtime domain names configuration
+sys.enable_extra_runtime_domain_names_conf = true
