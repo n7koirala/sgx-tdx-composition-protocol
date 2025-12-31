@@ -46,5 +46,5 @@ python3 tdx_verifier_service.py 9999
 ## Last Updated
 
 - **Date**: 2025-12-31
-- **Author**: Claude (AI Assistant)
+- **Development Platform**: Antigravity
 - **Status**: Working ✓
