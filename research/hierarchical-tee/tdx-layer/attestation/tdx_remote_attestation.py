@@ -112,21 +112,76 @@ class TDXAttestor:
     2. Get attestation tokens from Intel Trust Authority
     3. Parse and verify attestation tokens
     4. Extract measurements for composition with SGX
+    
+    Token caching is enabled by default to avoid hitting API rate limits.
     """
     
-    def __init__(self, config_path: str = None):
+    # Class-level token cache to persist across instances
+    _token_cache: Dict[str, 'TDXAttestationToken'] = {}
+    
+    # Cache expiry buffer in seconds (refresh token this many seconds before expiry)
+    CACHE_EXPIRY_BUFFER = 60
+    
+    def __init__(self, config_path: str = None, use_cache: bool = True):
         """
         Initialize TDX Attestor
         
         Args:
             config_path: Path to Intel Trust Authority config JSON
                         Defaults to ~/config.json
+            use_cache: Whether to use token caching (default: True)
+                      Set to False to always fetch fresh tokens
         """
         if config_path is None:
             config_path = os.path.expanduser("~/config.json")
         
         self.config_path = config_path
+        self.use_cache = use_cache
         self._verify_setup()
+    
+    def _get_cache_key(self, user_data: Optional[str] = None, 
+                       request_id: Optional[str] = None) -> str:
+        """Generate a cache key from user_data and request_id"""
+        key_parts = [
+            user_data or "default",
+            request_id or "no_request_id"
+        ]
+        return ":".join(key_parts)
+    
+    def _get_cached_token(self, cache_key: str) -> Optional['TDXAttestationToken']:
+        """
+        Get a cached token if it exists and is still valid
+        
+        Returns None if no valid cached token exists
+        """
+        if cache_key not in self._token_cache:
+            return None
+        
+        token = self._token_cache[cache_key]
+        
+        # Check if token is still valid (with buffer time)
+        exp = token.payload.get('exp', 0)
+        if exp > (time.time() + self.CACHE_EXPIRY_BUFFER):
+            return token
+        
+        # Token expired or will expire soon, remove from cache
+        del self._token_cache[cache_key]
+        return None
+    
+    def _cache_token(self, cache_key: str, token: 'TDXAttestationToken') -> None:
+        """Store a token in the cache"""
+        self._token_cache[cache_key] = token
+    
+    def clear_cache(self) -> int:
+        """
+        Clear all cached tokens
+        
+        Returns:
+            Number of tokens cleared
+        """
+        count = len(self._token_cache)
+        self._token_cache.clear()
+        return count
     
     def _verify_setup(self):
         """Verify TDX and Trust Authority are available"""
@@ -182,22 +237,33 @@ class TDXAttestor:
         )
     
     def get_attestation_token(self, user_data: str = None, 
-                               request_id: str = None) -> TDXAttestationToken:
+                               request_id: str = None,
+                               force_refresh: bool = False) -> TDXAttestationToken:
         """
         Get verified attestation token from Intel Trust Authority
         
         This is the main method for remote attestation. It:
-        1. Generates a TDX quote
-        2. Sends it to Intel Trust Authority
-        3. Returns a signed JWT token
+        1. Checks cache for a valid token (if caching enabled)
+        2. If not cached, generates a TDX quote
+        3. Sends it to Intel Trust Authority
+        4. Caches and returns the signed JWT token
         
         Args:
             user_data: Optional base64-encoded user data to include
             request_id: Optional request ID for tracking
+            force_refresh: Force fetch a new token, bypassing cache
         
         Returns:
             TDXAttestationToken containing the verified attestation
         """
+        cache_key = self._get_cache_key(user_data, request_id)
+        
+        # Check cache first (unless force_refresh is True)
+        if self.use_cache and not force_refresh:
+            cached_token = self._get_cached_token(cache_key)
+            if cached_token is not None:
+                return cached_token
+        
         cmd = ["sudo", "trustauthority-cli", "token", "--tdx", "-c", self.config_path]
         
         if user_data:
@@ -211,16 +277,22 @@ class TDXAttestor:
             raise RuntimeError(f"Token generation failed: {result.stderr}")
         
         # Extract JWT token from output (last non-empty line starting with eyJ)
-        token = None
+        token_str = None
         for line in result.stdout.strip().split('\n'):
             if line.startswith('eyJ'):
-                token = line
+                token_str = line
                 break
         
-        if not token:
+        if not token_str:
             raise RuntimeError("No JWT token found in output")
         
-        return self.parse_token(token)
+        token = self.parse_token(token_str)
+        
+        # Cache the token
+        if self.use_cache:
+            self._cache_token(cache_key, token)
+        
+        return token
     
     def parse_token(self, token: str) -> TDXAttestationToken:
         """
@@ -254,22 +326,26 @@ class TDXAttestor:
         decoded = base64.urlsafe_b64decode(padded)
         return json.loads(decoded)
     
-    def get_binding_data(self, sgx_mrenclave: str = None) -> Tuple[str, TDXAttestationToken]:
+    def get_binding_data(self, sgx_mrenclave: str = None, 
+                         force_refresh: bool = False) -> Tuple[str, TDXAttestationToken]:
         """
         Get TDX attestation with binding data for SGX composition
         
         This method creates attestation evidence that can be bound to an SGX enclave.
         The binding is done by including the SGX MRENCLAVE in the TDX report data.
         
+        Uses token caching to avoid rate limits - pass force_refresh=True to bypass cache.
+        
         Args:
             sgx_mrenclave: Optional SGX enclave measurement to bind to
+            force_refresh: Force fetch a new token, bypassing cache
         
         Returns:
             Tuple of (binding_hash, TDXAttestationToken)
         """
         # Create binding data that includes SGX measurement
+        # Note: We don't include timestamp to allow caching with the same user_data
         binding_data = {
-            "timestamp": datetime.now().isoformat(),
             "purpose": "hierarchical-tee-composition",
         }
         
@@ -283,8 +359,8 @@ class TDXAttestor:
         # Encode as base64 for user_data
         user_data = base64.b64encode(binding_hash[:32].encode()).decode()
         
-        # Get attestation with binding data
-        token = self.get_attestation_token(user_data=user_data)
+        # Get attestation with binding data (uses cache if available)
+        token = self.get_attestation_token(user_data=user_data, force_refresh=force_refresh)
         
         return binding_hash, token
     
@@ -389,6 +465,7 @@ def main():
         print("\n[1] Initializing TDX Attestor...")
         attestor = TDXAttestor()
         print("    ✓ TDX Attestor initialized successfully")
+        print(f"    Cache enabled: {attestor.use_cache}")
         
         # Get evidence
         print("\n[2] Generating TDX evidence (quote)...")
@@ -398,16 +475,24 @@ def main():
         print(f"    ✓ Evidence generated in {evidence_time:.2f} ms")
         print(f"    Quote length: {len(evidence.quote)} bytes (base64)")
         
-        # Get attestation token
+        # Get attestation token (first call - fresh fetch)
         print("\n[3] Getting attestation token from Intel Trust Authority...")
         start = time.perf_counter()
         token = attestor.get_attestation_token()
         token_time = (time.perf_counter() - start) * 1000
-        print(f"    ✓ Token received in {token_time:.2f} ms")
+        print(f"    ✓ Token received in {token_time:.2f} ms (fresh fetch)")
         print(f"    Token length: {len(token.raw_token)} bytes")
         
+        # Demonstrate caching - second call should be instant
+        print("\n[4] Demonstrating token caching...")
+        start = time.perf_counter()
+        cached_token = attestor.get_attestation_token()
+        cached_time = (time.perf_counter() - start) * 1000
+        print(f"    ✓ Token retrieved in {cached_time:.2f} ms (from cache)")
+        print(f"    Same token: {token.raw_token == cached_token.raw_token}")
+        
         # Display key measurements
-        print("\n[4] TDX Measurements:")
+        print("\n[5] TDX Measurements:")
         print(f"    MRTD:        {token.mrtd[:32]}...")
         print(f"    RTMR0:       {token.rtmrs.get('rtmr0', 'N/A')[:32]}...")
         print(f"    Report Data: {token.report_data[:32]}...")
@@ -415,28 +500,41 @@ def main():
         print(f"    Debuggable:  {token.is_debuggable}")
         
         # Verify token
-        print("\n[5] Verifying token...")
+        print("\n[6] Verifying token...")
         is_valid, message = attestor.verify_token_locally(token)
         if is_valid:
             print(f"    ✓ {message}")
         else:
             print(f"    ✗ {message}")
+
+        # Get binding data (uses caching)
+        print("\n[7] Getting SGX Binding Data (uses caching)...")
+        start = time.perf_counter()
+        binding_hash, binding_token = attestor.get_binding_data()
+        binding_time = (time.perf_counter() - start) * 1000
+        print(f"    ✓ Binding data retrieved in {binding_time:.2f} ms")
+        print(f"    Binding hash: {binding_hash[:32]}...")
+        print(f"    Token length: {len(binding_token.raw_token)} bytes")
         
-        # Demonstrate SGX binding calculation (without making another API call)
-        # Note: get_binding_data() makes an additional API call which can hit rate limits
-        # For demo, we show how binding would work
-        print("\n[6] SGX Binding Info (demo without API call):")
-        mock_mrenclave = "05b8e0fe8118ceb23099e92fb9be99d154a043d62626624cf0e9de40390cf0e3"
-        binding_data = {
-            "purpose": "hierarchical-tee-composition",
-            "sgx_mrenclave": mock_mrenclave
-        }
-        binding_hash = hashlib.sha256(json.dumps(binding_data, sort_keys=True).encode()).hexdigest()
-        print(f"    Mock SGX MRENCLAVE: {mock_mrenclave[:16]}...")
-        print(f"    Binding hash:       {binding_hash[:32]}...")
-        print(f"    To create bound attestation, call:")
-        print(f"      attestor.get_binding_data(sgx_mrenclave='{mock_mrenclave}')")
-        print(f"    Note: This makes an API call (subject to rate limits)")
+        # Second call to get_binding_data should be cached
+        print("\n[8] Calling get_binding_data again (from cache)...")
+        start = time.perf_counter()
+        binding_hash2, binding_token2 = attestor.get_binding_data(force_refresh=False)
+        binding_time2 = (time.perf_counter() - start) * 1000
+        print(f"    ✓ Binding data retrieved in {binding_time2:.2f} ms (from cache)")
+        print(f"    Same token: {binding_token.raw_token == binding_token2.raw_token}")
+
+        # Demonstrate force_refresh
+        # print("\n[9] Force refresh to bypass cache...")
+        # start = time.perf_counter()
+        # _, fresh_token = attestor.get_binding_data(force_refresh=True)
+        # fresh_time = (time.perf_counter() - start) * 1000
+        # print(f"    ✓ Fresh token fetched in {fresh_time:.2f} ms (forced refresh)")
+        
+        # Show cache info
+        print(f"\n[10] Cache Info:")
+        print(f"    Tokens cached: {len(attestor._token_cache)}")
+        print(f"    Cache expiry buffer: {attestor.CACHE_EXPIRY_BUFFER} seconds")
         
         print("\n" + "=" * 70)
         print("TDX Remote Attestation Demo Complete")
