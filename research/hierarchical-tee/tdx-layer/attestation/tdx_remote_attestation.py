@@ -63,9 +63,43 @@ class TDXAttestationToken:
     tcb_status: str = ""
     is_debuggable: bool = False
     
+    # Additional TDX module measurements
+    mrseam: str = ""  # TDX Module measurement
+    mrsignerseam: str = ""  # TDX Module signer measurement
+    seamsvn: int = 0  # SEAM module security version
+    
+    # TD owner info
+    mrowner: str = ""  # TD Owner identity
+    mrownerconfig: str = ""  # TD Owner configuration
+    
+    # TD attributes
+    xfam: str = ""  # Extended Feature Activation Mask
+    td_attributes: Dict[str, Any] = field(default_factory=dict)
+    
+    # TCB information (platform-linkable!)
+    tcb_date: str = ""  # TCB date - reveals patch timeline
+    advisory_ids: list = field(default_factory=list)  # Security advisories
+    
+    # Collateral info (highly linkable - contains platform IDs)
+    collateral: Dict[str, Any] = field(default_factory=dict)
+    
+    # JWT metadata
+    issuer: str = ""
+    issued_at: int = 0
+    expires_at: int = 0
+    token_id: str = ""
+    
     def __post_init__(self):
+        # Extract JWT standard claims
+        self.issuer = self.payload.get('iss', '')
+        self.issued_at = self.payload.get('iat', 0)
+        self.expires_at = self.payload.get('exp', 0)
+        self.token_id = self.payload.get('jti', '')
+        
         if 'tdx' in self.payload:
             tdx = self.payload['tdx']
+            
+            # Core TD measurements
             self.mrtd = tdx.get('tdx_mrtd', '')
             self.rtmrs = {
                 'rtmr0': tdx.get('tdx_rtmr0', ''),
@@ -76,6 +110,38 @@ class TDXAttestationToken:
             self.report_data = tdx.get('tdx_report_data', '')
             self.tcb_status = tdx.get('attester_tcb_status', '')
             self.is_debuggable = tdx.get('tdx_is_debuggable', False)
+            
+            # TDX module measurements
+            self.mrseam = tdx.get('tdx_mrseam', '')
+            self.mrsignerseam = tdx.get('tdx_mrsignerseam', '')
+            self.seamsvn = tdx.get('tdx_seamsvn', 0)
+            
+            # TD owner info
+            self.mrowner = tdx.get('tdx_mrowner', '')
+            self.mrownerconfig = tdx.get('tdx_mrownerconfig', '')
+            
+            # TD attributes
+            self.xfam = tdx.get('tdx_xfam', '')
+            self.td_attributes = {
+                'debug': tdx.get('tdx_is_debuggable', False),
+                'septve_disable': tdx.get('tdx_td_attributes_septve_disable', None),
+                'pks': tdx.get('tdx_td_attributes_pks', None),
+                'kl': tdx.get('tdx_td_attributes_kl', None),
+            }
+            
+            # TCB info (platform-linkable)
+            self.tcb_date = tdx.get('attester_tcb_date', '')
+            self.advisory_ids = tdx.get('attester_advisory_ids', [])
+            
+            # Collateral (highly linkable - contains FMSPC, QE hash, etc.)
+            if 'tdx_collateral' in tdx:
+                self.collateral = tdx['tdx_collateral']
+            else:
+                # Some fields might be at top level
+                self.collateral = {
+                    'fmspc': tdx.get('fmspc', ''),
+                    'pce_id': tdx.get('pce_id', ''),
+                }
     
     def get_measurements(self) -> Dict[str, str]:
         """Get key measurements for binding with SGX"""
@@ -85,10 +151,19 @@ class TDXAttestationToken:
             **self.rtmrs
         }
     
+    def get_platform_linkable_fields(self) -> Dict[str, Any]:
+        """Get fields that could be used to link attestations to the same platform"""
+        return {
+            'tcb_status': self.tcb_status,
+            'tcb_date': self.tcb_date,
+            'advisory_ids': self.advisory_ids,
+            'seamsvn': self.seamsvn,
+            'collateral': self.collateral,
+        }
+    
     def is_valid(self) -> bool:
         """Check if token is valid (not expired)"""
-        exp = self.payload.get('exp', 0)
-        return exp > time.time()
+        return self.expires_at > time.time()
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -98,8 +173,20 @@ class TDXAttestationToken:
             'report_data': self.report_data,
             'tcb_status': self.tcb_status,
             'is_debuggable': self.is_debuggable,
-            'exp': self.payload.get('exp'),
-            'iat': self.payload.get('iat'),
+            'mrseam': self.mrseam,
+            'mrsignerseam': self.mrsignerseam,
+            'seamsvn': self.seamsvn,
+            'mrowner': self.mrowner,
+            'mrownerconfig': self.mrownerconfig,
+            'xfam': self.xfam,
+            'td_attributes': self.td_attributes,
+            'tcb_date': self.tcb_date,
+            'advisory_ids': self.advisory_ids,
+            'collateral': self.collateral,
+            'issuer': self.issuer,
+            'exp': self.expires_at,
+            'iat': self.issued_at,
+            'jti': self.token_id,
         }
 
 
@@ -491,16 +578,105 @@ def main():
         print(f"    ✓ Token retrieved in {cached_time:.2f} ms (from cache)")
         print(f"    Same token: {token.raw_token == cached_token.raw_token}")
         
-        # Display key measurements
-        print("\n[5] TDX Measurements:")
-        print(f"    MRTD:        {token.mrtd[:32]}...")
-        print(f"    RTMR0:       {token.rtmrs.get('rtmr0', 'N/A')[:32]}...")
-        print(f"    Report Data: {token.report_data[:32]}...")
-        print(f"    TCB Status:  {token.tcb_status}")
-        print(f"    Debuggable:  {token.is_debuggable}")
+        # Display ALL token fields for research analysis
+        print("\n[5] TDX Token Contents (All Fields):")
         
+        # 5a. Core TD Measurements (TD-specific, not platform-linkable)
+        print("\n    ═══════════════════════════════════════════════════════════════")
+        print("    [5a] CORE TD MEASUREMENTS (TD-specific, privacy-preserving)")
+        print("    ═══════════════════════════════════════════════════════════════")
+        print(f"    MRTD (TD Measurement):     {token.mrtd[:48]}..." if token.mrtd else "    MRTD: N/A")
+        print(f"    RTMR0 (Firmware):          {token.rtmrs.get('rtmr0', 'N/A')[:48]}..." if token.rtmrs.get('rtmr0') else "    RTMR0: N/A")
+        print(f"    RTMR1 (OS Boot):           {token.rtmrs.get('rtmr1', 'N/A')[:48]}..." if token.rtmrs.get('rtmr1') else "    RTMR1: N/A")
+        print(f"    RTMR2 (OS Runtime):        {token.rtmrs.get('rtmr2', 'N/A')[:48]}..." if token.rtmrs.get('rtmr2') else "    RTMR2: N/A")
+        print(f"    RTMR3 (Application):       {token.rtmrs.get('rtmr3', 'N/A')[:48]}..." if token.rtmrs.get('rtmr3') else "    RTMR3: N/A")
+        print(f"    Report Data (User):        {token.report_data[:48]}..." if token.report_data else "    Report Data: N/A")
+        
+        # 5b. TDX Module Info
+        print("\n    ═══════════════════════════════════════════════════════════════")
+        print("    [5b] TDX MODULE MEASUREMENTS (same across platforms with same TDX version)")
+        print("    ═══════════════════════════════════════════════════════════════")
+        print(f"    MRSEAM (TDX Module):       {token.mrseam[:48]}..." if token.mrseam else "    MRSEAM: N/A")
+        print(f"    MRSIGNERSEAM (Module Signer): {token.mrsignerseam[:48]}..." if token.mrsignerseam else "    MRSIGNERSEAM: N/A")
+        print(f"    SEAM SVN:                  {token.seamsvn}")
+        
+        # 5c. TD Owner Info
+        print("\n    ═══════════════════════════════════════════════════════════════")
+        print("    [5c] TD OWNER INFORMATION")
+        print("    ═══════════════════════════════════════════════════════════════")
+        print(f"    MROWNER:                   {token.mrowner[:48]}..." if token.mrowner else "    MROWNER: N/A (not set)")
+        print(f"    MROWNERCONFIG:             {token.mrownerconfig[:48]}..." if token.mrownerconfig else "    MROWNERCONFIG: N/A (not set)")
+        
+        # 5d. TD Attributes
+        print("\n    ═══════════════════════════════════════════════════════════════")
+        print("    [5d] TD ATTRIBUTES")
+        print("    ═══════════════════════════════════════════════════════════════")
+        print(f"    XFAM:                      {token.xfam}" if token.xfam else "    XFAM: N/A")
+        print(f"    Debug Mode:                {token.is_debuggable} {'⚠️  WARNING: Not for production!' if token.is_debuggable else '✓'}")
+        print(f"    SEPT VE Disabled:          {token.td_attributes.get('septve_disable', 'N/A')}")
+        print(f"    PKS (Protection Keys):     {token.td_attributes.get('pks', 'N/A')}")
+        print(f"    KL (Key Locker):           {token.td_attributes.get('kl', 'N/A')}")
+        
+        # 5e. TCB Information (PLATFORM-LINKABLE!)
+        print("\n    ═══════════════════════════════════════════════════════════════")
+        print("    [5e] TCB INFORMATION ⚠️  PLATFORM-LINKABLE!")
+        print("    ═══════════════════════════════════════════════════════════════")
+        print(f"    TCB Status:                {token.tcb_status}")
+        print(f"    TCB Date:                  {token.tcb_date}")
+        print(f"    Advisory IDs:              {len(token.advisory_ids)} advisories")
+        if token.advisory_ids:
+            for adv in token.advisory_ids[:5]:  # Show first 5
+                print(f"      - {adv}")
+            if len(token.advisory_ids) > 5:
+                print(f"      ... and {len(token.advisory_ids) - 5} more")
+        
+        # 5f. Collateral (HIGHLY LINKABLE - PCK-derived!)
+        print("\n    ═══════════════════════════════════════════════════════════════")
+        print("    [5f] COLLATERAL ⚠️  HIGHLY LINKABLE (PCK-derived platform IDs)")
+        print("    ═══════════════════════════════════════════════════════════════")
+        if token.collateral:
+            fmspc = token.collateral.get('fmspc', 'N/A')
+            print(f"    SAME across quotes->    FMSPC (Platform Family):   {fmspc}")
+            pce_id = token.collateral.get('pce_id', token.collateral.get('pceid', 'N/A'))
+            print(f"                            PCE ID:                    {pce_id}")
+            qe_id = token.collateral.get('qeid', token.collateral.get('qeidhash', 'N/A'))
+            if qe_id and qe_id != 'N/A':
+                print(f"    SAME across quotes->    QE ID Hash:                {str(qe_id)[:32]}...")
+            tcb_eval = token.collateral.get('tcbevaluationdatanumber', 'N/A')
+            print(f"    TCB Eval Number:           {tcb_eval}")
+            # Show any other collateral fields
+            other_fields = {k: v for k, v in token.collateral.items() 
+                          if k not in ['fmspc', 'pce_id', 'pceid', 'qeid', 'qeidhash', 'tcbevaluationdatanumber']}
+            if other_fields:
+                print(f"    Other collateral fields:   {list(other_fields.keys())}")
+        else:
+            print("    (No collateral data in token)")
+        
+        # 5g. JWT Metadata
+        print("\n    ═══════════════════════════════════════════════════════════════")
+        print("    [5g] JWT TOKEN METADATA")
+        print("    ═══════════════════════════════════════════════════════════════")
+        print(f"    Issuer:                    {token.issuer}")
+        print(f"    Token ID (JTI):            {token.token_id[:32]}..." if token.token_id else "    Token ID: N/A")
+        from datetime import datetime
+        if token.issued_at:
+            print(f"    Issued At:                 {datetime.fromtimestamp(token.issued_at).isoformat()}")
+        if token.expires_at:
+            print(f"    Expires At:                {datetime.fromtimestamp(token.expires_at).isoformat()}")
+            remaining = token.expires_at - time.time()
+            print(f"    Time Remaining:            {remaining:.0f} seconds")
+        
+        # 5h. Privacy Summary
+        print("\n    ═══════════════════════════════════════════════════════════════")
+        print("    [5h] PRIVACY ANALYSIS SUMMARY")
+        print("    ═══════════════════════════════════════════════════════════════")
+        print("    ✓ SAFE (TD-specific):      MRTD, RTMR0-3, Report Data, MROWNER")
+        print("    ⚠️  CAUTION (version-based): MRSEAM, SEAMSVN, TCB Status/Date")  
+        print("    ✗ LINKABLE (platform-ID):  FMSPC, PCE_ID, QE_ID, Advisory IDs")
+        print("    → For privacy-preserving attestation, anonymize/remove ✗ fields")
+
         # Verify token
-        print("\n[6] Verifying token...")
+        print("\n[6] Verifying token... (only checks structure and expiry.\n    Full verification requires checking the signature against Intel's public keys)")
         is_valid, message = attestor.verify_token_locally(token)
         if is_valid:
             print(f"    ✓ {message}")
