@@ -1,0 +1,359 @@
+"""
+Hierarchical TEE Attestation Protocol - Shared Protocol Definitions
+
+This module contains shared message formats and utilities used by both
+the TDX attestation server and SGX enclave verifier.
+
+Protocol Overview:
+    1. SGX Enclave generates a nonce and sends AttestationRequest
+    2. TDX Server receives request, generates quote with nonce in report_data
+    3. TDX Server returns AttestationResponse with JWT token
+    4. SGX Enclave verifies token (issuer, expiry, nonce binding)
+"""
+
+import json
+import base64
+import secrets
+import hashlib
+import time
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, Tuple
+from datetime import datetime
+
+# Protocol version for compatibility checks
+PROTOCOL_VERSION = "1.0"
+
+# Default configuration
+DEFAULT_PORT = 8443
+NONCE_SIZE = 32  # bytes
+
+
+@dataclass
+class AttestationRequest:
+    """
+    Attestation challenge sent from SGX Enclave to TDX Server.
+    
+    The nonce ensures freshness and prevents replay attacks.
+    It will be bound into the TDX quote's report_data.
+    """
+    action: str = "attest"
+    nonce: str = ""  # Base64 encoded 32-byte nonce
+    protocol_version: str = PROTOCOL_VERSION
+    timestamp: float = field(default_factory=time.time)
+    
+    def to_json(self) -> str:
+        return json.dumps({
+            "action": self.action,
+            "nonce": self.nonce,
+            "protocol_version": self.protocol_version,
+            "timestamp": self.timestamp
+        })
+    
+    @classmethod
+    def from_json(cls, data: str) -> 'AttestationRequest':
+        d = json.loads(data)
+        return cls(
+            action=d.get("action", "attest"),
+            nonce=d.get("nonce", ""),
+            protocol_version=d.get("protocol_version", PROTOCOL_VERSION),
+            timestamp=d.get("timestamp", time.time())
+        )
+    
+    def validate(self) -> Tuple[bool, str]:
+        """Validate the request fields"""
+        if self.action != "attest":
+            return False, f"Unknown action: {self.action}"
+        
+        if not self.nonce:
+            return False, "Missing nonce"
+        
+        try:
+            nonce_bytes = base64.b64decode(self.nonce)
+            if len(nonce_bytes) != NONCE_SIZE:
+                return False, f"Invalid nonce size: expected {NONCE_SIZE}, got {len(nonce_bytes)}"
+        except Exception as e:
+            return False, f"Invalid nonce encoding: {e}"
+        
+        return True, "OK"
+
+
+@dataclass
+class AttestationResponse:
+    """
+    Attestation response from TDX Server to SGX Enclave.
+    
+    Contains the Intel Trust Authority JWT token with the nonce
+    bound in the TDX quote's report_data.
+    """
+    status: str = "success"  # "success" or "error"
+    token: str = ""          # JWT token from Intel Trust Authority
+    nonce_echo: str = ""     # Echo of the received nonce
+    mrtd: str = ""           # TD Measurement for quick reference
+    error: str = ""          # Error message if status is "error"
+    protocol_version: str = PROTOCOL_VERSION
+    timestamp: float = field(default_factory=time.time)
+    
+    def to_json(self) -> str:
+        return json.dumps({
+            "status": self.status,
+            "token": self.token,
+            "nonce_echo": self.nonce_echo,
+            "mrtd": self.mrtd,
+            "error": self.error,
+            "protocol_version": self.protocol_version,
+            "timestamp": self.timestamp
+        })
+    
+    @classmethod
+    def from_json(cls, data: str) -> 'AttestationResponse':
+        d = json.loads(data)
+        return cls(
+            status=d.get("status", "error"),
+            token=d.get("token", ""),
+            nonce_echo=d.get("nonce_echo", ""),
+            mrtd=d.get("mrtd", ""),
+            error=d.get("error", ""),
+            protocol_version=d.get("protocol_version", PROTOCOL_VERSION),
+            timestamp=d.get("timestamp", time.time())
+        )
+    
+    @classmethod
+    def error_response(cls, error_msg: str) -> 'AttestationResponse':
+        """Create an error response"""
+        return cls(status="error", error=error_msg)
+
+
+@dataclass
+class VerificationResult:
+    """
+    Result of TDX attestation verification by SGX Enclave.
+    """
+    verified: bool = False
+    verdict: str = ""  # "TRUSTED", "UNTRUSTED", "ERROR"
+    mrtd: str = ""
+    tcb_status: str = ""
+    is_debuggable: bool = False
+    nonce_verified: bool = False
+    issuer_verified: bool = False
+    expiry_verified: bool = False
+    warnings: list = field(default_factory=list)
+    error: str = ""
+    verification_time_ms: float = 0.0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "verified": self.verified,
+            "verdict": self.verdict,
+            "mrtd": self.mrtd,
+            "tcb_status": self.tcb_status,
+            "is_debuggable": self.is_debuggable,
+            "checks": {
+                "nonce": self.nonce_verified,
+                "issuer": self.issuer_verified,
+                "expiry": self.expiry_verified
+            },
+            "warnings": self.warnings,
+            "error": self.error,
+            "verification_time_ms": self.verification_time_ms
+        }
+
+
+def generate_nonce() -> str:
+    """
+    Generate a cryptographically secure nonce for attestation challenge.
+    
+    Returns:
+        Base64-encoded 32-byte nonce
+    """
+    nonce_bytes = secrets.token_bytes(NONCE_SIZE)
+    return base64.b64encode(nonce_bytes).decode('ascii')
+
+
+def verify_nonce_binding(expected_nonce: str, report_data: str) -> bool:
+    """
+    Verify that the nonce is properly bound in the TDX report_data.
+    
+    The TDX attestation process encodes the nonce (or its hash) in the
+    report_data field of the quote.
+    
+    Args:
+        expected_nonce: Base64-encoded nonce that was sent
+        report_data: report_data from TDX token (hex string)
+    
+    Returns:
+        True if nonce is properly bound, False otherwise
+    """
+    try:
+        # Decode the expected nonce
+        nonce_bytes = base64.b64decode(expected_nonce)
+        
+        # The nonce can be bound in different ways:
+        # 1. Direct encoding (first 32 bytes of report_data)
+        # 2. Hash of nonce
+        # 3. As part of user_data structure
+        
+        if not report_data:
+            return False
+        
+        # Try direct comparison (report_data is hex-encoded)
+        try:
+            report_data_bytes = bytes.fromhex(report_data)
+        except ValueError:
+            # Try base64 decoding
+            try:
+                report_data_bytes = base64.b64decode(report_data)
+            except:
+                return False
+        
+        # Check if nonce appears in report_data
+        # Method 1: Direct embedding
+        if nonce_bytes in report_data_bytes:
+            return True
+        
+        # Method 2: Base64 nonce embedded as string (first 32 chars when truncated)
+        nonce_b64_bytes = expected_nonce[:32].encode('utf-8')
+        if nonce_b64_bytes in report_data_bytes:
+            return True
+        
+        # Method 3: Hash of nonce
+        nonce_hash = hashlib.sha256(expected_nonce.encode()).hexdigest()[:32]
+        if nonce_hash.encode() in report_data_bytes:
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"Nonce verification error: {e}")
+        return False
+
+
+def decode_jwt_payload(token: str) -> Dict[str, Any]:
+    """
+    Decode the payload from a JWT token (without signature verification).
+    
+    Args:
+        token: JWT token string
+    
+    Returns:
+        Decoded payload as dictionary
+    """
+    parts = token.split('.')
+    if len(parts) != 3:
+        raise ValueError("Invalid JWT format")
+    
+    # Decode payload (second part)
+    payload_b64 = parts[1]
+    # Add padding if needed
+    padded = payload_b64 + '=' * (4 - len(payload_b64) % 4)
+    payload_bytes = base64.urlsafe_b64decode(padded)
+    return json.loads(payload_bytes)
+
+
+def verify_jwt_simple(token: str, expected_issuer_substring: str = "trustauthority.intel.com") -> Tuple[bool, Dict[str, Any], str]:
+    """
+    Perform simple JWT verification (issuer + expiry, no signature check).
+    
+    This is a lightweight verification suitable for research purposes.
+    For production, use cryptographic signature verification.
+    
+    Args:
+        token: JWT token string
+        expected_issuer_substring: Substring that must appear in issuer
+    
+    Returns:
+        Tuple of (is_valid, payload_dict, error_message)
+    """
+    try:
+        payload = decode_jwt_payload(token)
+        
+        # Check issuer
+        issuer = payload.get('iss', '')
+        if expected_issuer_substring not in issuer:
+            return False, payload, f"Invalid issuer: {issuer}"
+        
+        # Check expiry
+        exp = payload.get('exp', 0)
+        now = time.time()
+        if exp < now:
+            return False, payload, f"Token expired at {datetime.fromtimestamp(exp).isoformat()}"
+        
+        return True, payload, "OK"
+        
+    except Exception as e:
+        return False, {}, str(e)
+
+
+class ProtocolError(Exception):
+    """Custom exception for protocol errors"""
+    pass
+
+
+def create_tls_context_server(cert_file: str, key_file: str):
+    """
+    Create TLS context for server (TDX attestation server).
+    
+    Args:
+        cert_file: Path to server certificate
+        key_file: Path to server private key
+    
+    Returns:
+        ssl.SSLContext configured for server
+    """
+    import ssl
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_file, key_file)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+def create_tls_context_client(ca_cert_file: str = None, verify: bool = True):
+    """
+    Create TLS context for client (SGX enclave).
+    
+    Args:
+        ca_cert_file: Path to CA certificate for verification
+        verify: Whether to verify server certificate
+    
+    Returns:
+        ssl.SSLContext configured for client
+    """
+    import ssl
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    
+    if verify and ca_cert_file:
+        context.load_verify_locations(ca_cert_file)
+        context.check_hostname = False  # Self-signed certs won't match hostname
+        context.verify_mode = ssl.CERT_REQUIRED
+    else:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
+# Message framing for TCP stream
+MESSAGE_DELIMITER = b'\n---END---\n'
+
+def send_message(sock, message: str):
+    """Send a framed message over socket"""
+    data = message.encode('utf-8') + MESSAGE_DELIMITER
+    sock.sendall(data)
+
+def receive_message(sock, timeout: float = 30.0) -> str:
+    """Receive a framed message from socket"""
+    sock.settimeout(timeout)
+    buffer = b""
+    while MESSAGE_DELIMITER not in buffer:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buffer += chunk
+        if len(buffer) > 100000:  # 100KB max
+            raise ProtocolError("Message too large")
+    
+    if MESSAGE_DELIMITER in buffer:
+        message, _ = buffer.split(MESSAGE_DELIMITER, 1)
+        return message.decode('utf-8')
+    
+    raise ProtocolError("Incomplete message received")

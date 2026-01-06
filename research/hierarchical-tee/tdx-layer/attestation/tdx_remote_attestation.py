@@ -643,7 +643,7 @@ def main():
             if qe_id and qe_id != 'N/A':
                 print(f"    SAME across quotes->    QE ID Hash:                {str(qe_id)[:32]}...")
             tcb_eval = token.collateral.get('tcbevaluationdatanumber', 'N/A')
-            print(f"    TCB Eval Number:           {tcb_eval}")
+            print(f"                            TCB Eval Number:           {tcb_eval}")
             # Show any other collateral fields
             other_fields = {k: v for k, v in token.collateral.items() 
                           if k not in ['fmspc', 'pce_id', 'pceid', 'qeid', 'qeidhash', 'tcbevaluationdatanumber']}
