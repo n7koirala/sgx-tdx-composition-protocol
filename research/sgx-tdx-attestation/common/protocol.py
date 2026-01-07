@@ -169,33 +169,29 @@ def generate_nonce() -> str:
     return base64.b64encode(nonce_bytes).decode('ascii')
 
 
-def verify_nonce_binding(expected_nonce: str, report_data: str) -> bool:
+def verify_nonce_binding(expected_nonce: str, report_data: str, debug: bool = False) -> bool:
     """
     Verify that the nonce is properly bound in the TDX report_data.
     
     The TDX attestation process encodes the nonce (or its hash) in the
-    report_data field of the quote.
+    report_data field of the quote. The trustauthority-cli takes user_data
+    as a string and encodes it as UTF-8 bytes in the report_data.
     
     Args:
         expected_nonce: Base64-encoded nonce that was sent
         report_data: report_data from TDX token (hex string)
+        debug: Enable debug output
     
     Returns:
         True if nonce is properly bound, False otherwise
     """
     try:
-        # Decode the expected nonce
-        nonce_bytes = base64.b64decode(expected_nonce)
-        
-        # The nonce can be bound in different ways:
-        # 1. Direct encoding (first 32 bytes of report_data)
-        # 2. Hash of nonce
-        # 3. As part of user_data structure
-        
         if not report_data:
+            if debug:
+                print(f"[DEBUG] report_data is empty")
             return False
         
-        # Try direct comparison (report_data is hex-encoded)
+        # Decode report_data from hex
         try:
             report_data_bytes = bytes.fromhex(report_data)
         except ValueError:
@@ -203,22 +199,49 @@ def verify_nonce_binding(expected_nonce: str, report_data: str) -> bool:
             try:
                 report_data_bytes = base64.b64decode(report_data)
             except:
+                if debug:
+                    print(f"[DEBUG] Could not decode report_data")
                 return False
         
-        # Check if nonce appears in report_data
-        # Method 1: Direct embedding
+        if debug:
+            print(f"[DEBUG] report_data (first 64 bytes): {report_data_bytes[:64]}")
+            print(f"[DEBUG] expected_nonce[:32]: {expected_nonce[:32]}")
+        
+        # The TDX server passes nonce[:32] to trustauthority-cli as user_data
+        # This gets encoded as UTF-8 bytes in the report_data
+        nonce_prefix = expected_nonce[:32]
+        nonce_prefix_bytes = nonce_prefix.encode('utf-8')
+        
+        # Check if the nonce prefix appears in report_data
+        if nonce_prefix_bytes in report_data_bytes:
+            if debug:
+                print(f"[DEBUG] Found nonce prefix in report_data")
+            return True
+        
+        # Also check for the full nonce (in case it fits)
+        if len(expected_nonce) <= 64:  # Max report_data is 64 bytes
+            nonce_full_bytes = expected_nonce.encode('utf-8')
+            if nonce_full_bytes in report_data_bytes:
+                if debug:
+                    print(f"[DEBUG] Found full nonce in report_data")
+                return True
+        
+        # Check if the decoded nonce bytes appear
+        nonce_bytes = base64.b64decode(expected_nonce)
         if nonce_bytes in report_data_bytes:
+            if debug:
+                print(f"[DEBUG] Found decoded nonce bytes in report_data")
             return True
         
-        # Method 2: Base64 nonce embedded as string (first 32 chars when truncated)
-        nonce_b64_bytes = expected_nonce[:32].encode('utf-8')
-        if nonce_b64_bytes in report_data_bytes:
+        # Check first 32 bytes of decoded nonce
+        if nonce_bytes[:32] in report_data_bytes:
+            if debug:
+                print(f"[DEBUG] Found first 32 bytes of decoded nonce in report_data")
             return True
         
-        # Method 3: Hash of nonce
-        nonce_hash = hashlib.sha256(expected_nonce.encode()).hexdigest()[:32]
-        if nonce_hash.encode() in report_data_bytes:
-            return True
+        if debug:
+            print(f"[DEBUG] Nonce not found in report_data")
+            print(f"[DEBUG] report_data hex: {report_data[:128]}...")
         
         return False
         
