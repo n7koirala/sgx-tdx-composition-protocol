@@ -44,7 +44,7 @@ fs.mounts = [
     # System config files (for networking)
     { path = "/etc", uri = "file:/etc" },
     
-    # Application directory (includes common module)
+    # Application directory (parent of sgx-verifier, includes common module)
     { path = "/app", uri = "file:{{ app_dir }}" },
     
     # Temporary filesystem
@@ -94,8 +94,8 @@ sgx.trusted_files = [
     "file:/usr/lib/python3/dist-packages/",
     "file:/usr/lib/python3/",
     
-    # Application code
-    "file:{{ app_dir }}/sgx-verifier/sgx_tdx_verifier.py",
+    # Application code - entire app directory
+    "file:{{ app_dir }}/sgx-verifier/",
     "file:{{ app_dir }}/common/",
     
     # SSL/TLS certificates (system CA bundle)

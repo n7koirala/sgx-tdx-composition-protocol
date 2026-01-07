@@ -104,10 +104,10 @@ run-sgx: all
 	@echo "Running TDX verifier inside SGX enclave..."
 	@echo "Target: $(TDX_HOST):$(TDX_PORT)"
 	@echo "========================================"
-	gramine-sgx ./verifier sgx_tdx_verifier.py \
+	gramine-sgx ./verifier /app/sgx-verifier/sgx_tdx_verifier.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
-		--ca-cert ../certs/ca.crt \
+		--ca-cert /app/certs/ca.crt \
 		--verbose
 
 # Run without SGX (direct mode)
@@ -115,7 +115,7 @@ run-direct: verifier.manifest
 	@echo ""
 	@echo "Running TDX verifier in direct mode..."
 	@echo "========================================"
-	gramine-direct ./verifier sgx_tdx_verifier.py \
+	gramine-direct ./verifier /app/sgx-verifier/sgx_tdx_verifier.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
 		--no-verify \
@@ -136,7 +136,7 @@ run-python:
 test-network: all
 	@echo ""
 	@echo "Testing network connectivity to $(TDX_HOST):$(TDX_PORT)..."
-	gramine-sgx ./verifier sgx_tdx_verifier.py \
+	gramine-sgx ./verifier /app/sgx-verifier/sgx_tdx_verifier.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
 		--no-verify \

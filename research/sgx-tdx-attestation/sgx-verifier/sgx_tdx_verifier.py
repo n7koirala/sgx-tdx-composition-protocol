@@ -182,7 +182,7 @@ class SGXTDXVerifier:
         # Verify nonce binding
         self.log("Verifying nonce binding...")
         report_data = tdx.get('tdx_report_data', '')
-        result.nonce_verified = verify_nonce_binding(expected_nonce, report_data)
+        result.nonce_verified = verify_nonce_binding(expected_nonce, report_data, debug=self.verbose)
         
         if not result.nonce_verified:
             result.error = "Nonce not properly bound in report_data"
