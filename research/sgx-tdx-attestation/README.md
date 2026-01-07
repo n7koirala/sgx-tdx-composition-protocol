@@ -30,8 +30,13 @@ A research implementation of hierarchical TEE attestation where an **SGX enclave
 ## Directory Structure
 
 ```
-hierarchical-attestation/
+sgx-tdx-attestation/
 ├── README.md                     # This file
+├── docs/                         # Documentation
+│   ├── SETUP_GUIDE.md            # End-to-end setup instructions
+│   ├── ARCHITECTURE.md           # System design and trust model
+│   ├── PROTOCOL_SPEC.md          # Message formats and verification
+│   └── TROUBLESHOOTING.md        # Common issues and solutions
 ├── certs/
 │   ├── generate_certs.sh         # TLS certificate generation
 │   ├── ca.crt                    # CA certificate (generated)
@@ -47,6 +52,15 @@ hierarchical-attestation/
     ├── verifier.manifest.template
     └── Makefile
 ```
+
+## Documentation
+
+For detailed setup and troubleshooting, see the [docs/](./docs/) folder:
+
+- **[SETUP_GUIDE.md](./docs/SETUP_GUIDE.md)** - Complete step-by-step setup instructions
+- **[ARCHITECTURE.md](./docs/ARCHITECTURE.md)** - System design, trust model, components
+- **[PROTOCOL_SPEC.md](./docs/PROTOCOL_SPEC.md)** - Message formats, nonce binding, verification
+- **[TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md)** - Common issues and solutions
 
 ## Quick Start
 
