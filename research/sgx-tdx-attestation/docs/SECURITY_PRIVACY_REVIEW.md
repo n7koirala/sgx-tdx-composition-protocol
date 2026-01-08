@@ -1,7 +1,5 @@
 # Security & Privacy Analysis: SGX-TDX Hierarchical Attestation Protocol
 
-> **Review Perspective**: Top-tier security conference (CCS/USENIX Security/S&P) program committee member evaluating this research protocol.
-
 ---
 
 ## Executive Summary
