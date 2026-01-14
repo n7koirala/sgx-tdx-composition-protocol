@@ -311,38 +311,57 @@ class ProtocolError(Exception):
     pass
 
 
-def create_tls_context_server(cert_file: str, key_file: str):
+def create_tls_context_server(cert_file: str, key_file: str,
+                               ca_cert_file: str = None,
+                               require_client_cert: bool = False):
     """
-    Create TLS context for server (TDX attestation server).
+    Create TLS context for server (TDX attestation server) with optional mTLS.
     
     Args:
         cert_file: Path to server certificate
         key_file: Path to server private key
+        ca_cert_file: Path to CA certificate for client verification (required for mTLS)
+        require_client_cert: If True, require client to present valid certificate
     
     Returns:
-        ssl.SSLContext configured for server
+        ssl.SSLContext configured for server with optional client auth
     """
     import ssl
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert_file, key_file)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
+    
+    # mTLS: Require client certificate verification
+    if require_client_cert:
+        if not ca_cert_file:
+            raise ValueError("CA certificate required for mTLS (require_client_cert=True)")
+        context.load_verify_locations(ca_cert_file)
+        context.verify_mode = ssl.CERT_REQUIRED  # Client MUST present valid cert
+        print(f"[mTLS] Server will require client certificates signed by CA")
+    
     return context
 
 
-def create_tls_context_client(ca_cert_file: str = None, verify: bool = True):
+def create_tls_context_client(ca_cert_file: str = None, 
+                               client_cert_file: str = None,
+                               client_key_file: str = None,
+                               verify: bool = True):
     """
-    Create TLS context for client (SGX enclave).
+    Create TLS context for client (SGX enclave) with optional mTLS.
     
     Args:
-        ca_cert_file: Path to CA certificate for verification
+        ca_cert_file: Path to CA certificate for server verification
+        client_cert_file: Path to client certificate (for mTLS)
+        client_key_file: Path to client private key (for mTLS)
         verify: Whether to verify server certificate
     
     Returns:
-        ssl.SSLContext configured for client
+        ssl.SSLContext configured for client with optional client auth
     """
     import ssl
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     
+    # Verify server certificate
     if verify and ca_cert_file:
         context.load_verify_locations(ca_cert_file)
         context.check_hostname = False  # Self-signed certs won't match hostname
@@ -350,6 +369,11 @@ def create_tls_context_client(ca_cert_file: str = None, verify: bool = True):
     else:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
+    
+    # mTLS: Present client certificate to server
+    if client_cert_file and client_key_file:
+        context.load_cert_chain(client_cert_file, client_key_file)
+        print(f"[mTLS] Client will present certificate for authentication")
     
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     return context

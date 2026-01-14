@@ -64,7 +64,7 @@ For detailed setup and troubleshooting, see the [docs/](./docs/) folder:
 
 ## Quick Start
 
-### 1. Generate TLS Certificates
+### 1. Generate TLS Certificates (with mTLS support)
 
 ```bash
 cd certs
@@ -72,27 +72,48 @@ chmod +x generate_certs.sh
 ./generate_certs.sh <TDX_IP_ADDRESS>
 ```
 
-Copy certificates to appropriate machines:
-- `ca.crt`, `server.crt`, `server.key` → TDX machine
-- `ca.crt` → SGX machine
+This generates 6 files:
+- `ca.crt`, `ca.key` - Certificate Authority
+- `server.crt`, `server.key` - TDX server certificates
+- `sgx_client.crt`, `sgx_client.key` - SGX enclave client certificates
+
+**Deployment:**
+- TDX machine: `ca.crt`, `server.crt`, `server.key`
+- SGX machine: `ca.crt`, `sgx_client.crt`, `sgx_client.key`
 
 ### 2. Start TDX Attestation Server (on TDX VM)
 
+**Standard mode (any client):**
 ```bash
 cd tdx-server
 python3 tdx_attestation_server.py --port 8443
 ```
 
+**Secure mode with mTLS (SGX enclave only):**
+```bash
+cd tdx-server
+python3 tdx_attestation_server.py --port 8443 --require-client-cert
+```
+
+With `--require-client-cert`, only clients presenting a valid certificate signed by the CA can connect.
+
 ### 3. Run SGX Verifier (on SGX Machine)
 
+**Standard mode:**
 ```bash
 cd sgx-verifier
-
-# Build the enclave
-make all
-
-# Run attestation
 make run-sgx TDX_HOST=<TDX_IP> TDX_PORT=8443
+```
+
+**With mTLS authentication:**
+```bash
+cd sgx-verifier
+python3 sgx_tdx_verifier.py \
+    --tdx-host <TDX_IP> \
+    --tdx-port 8443 \
+    --ca-cert ../certs/ca.crt \
+    --client-cert ../certs/sgx_client.crt \
+    --client-key ../certs/sgx_client.key
 ```
 
 ## Protocol Details

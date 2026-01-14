@@ -51,19 +51,25 @@ from common.protocol import (
 
 class SGXTDXVerifier:
     """
-    SGX Enclave-based TDX attestation verifier.
+    SGX Enclave-based TDX attestation verifier with mTLS support.
     
     Connects to TDX attestation server, challenges it with a nonce,
     and verifies the returned attestation token.
+    
+    When client_cert and client_key are provided, the verifier authenticates
+    itself to the TDX server using mutual TLS (mTLS).
     """
     
     def __init__(self, tdx_host: str, tdx_port: int,
                  ca_cert: str = None, verify_cert: bool = True,
+                 client_cert: str = None, client_key: str = None,
                  verbose: bool = False):
         self.tdx_host = tdx_host
         self.tdx_port = tdx_port
         self.ca_cert = ca_cert
         self.verify_cert = verify_cert
+        self.client_cert = client_cert
+        self.client_key = client_key
         self.verbose = verbose
     
     def log(self, msg: str):
@@ -87,10 +93,12 @@ class SGXTDXVerifier:
             nonce = generate_nonce()
             self.log(f"Nonce: {nonce[:16]}...")
             
-            # Step 2: Create TLS connection
+            # Step 2: Create TLS connection (with mTLS if client cert provided)
             self.log(f"Connecting to {self.tdx_host}:{self.tdx_port}...")
             tls_context = create_tls_context_client(
                 ca_cert_file=self.ca_cert,
+                client_cert_file=self.client_cert,
+                client_key_file=self.client_key,
                 verify=self.verify_cert
             )
             
@@ -316,6 +324,10 @@ def main():
                        help=f"TDX server port (default: {DEFAULT_PORT})")
     parser.add_argument("--ca-cert",
                        help="CA certificate for TLS verification")
+    parser.add_argument("--client-cert",
+                       help="Client certificate for mTLS authentication")
+    parser.add_argument("--client-key",
+                       help="Client private key for mTLS authentication")
     parser.add_argument("--no-verify", action="store_true",
                        help="Skip TLS certificate verification")
     parser.add_argument("--test-network", action="store_true",
@@ -335,10 +347,21 @@ def main():
     print()
     
     # Resolve CA cert path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
     ca_cert = None
     if args.ca_cert:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
         ca_cert = os.path.join(script_dir, args.ca_cert) if not os.path.isabs(args.ca_cert) else args.ca_cert
+    
+    # Resolve client cert paths for mTLS
+    client_cert = None
+    client_key = None
+    if args.client_cert and args.client_key:
+        client_cert = os.path.join(script_dir, args.client_cert) if not os.path.isabs(args.client_cert) else args.client_cert
+        client_key = os.path.join(script_dir, args.client_key) if not os.path.isabs(args.client_key) else args.client_key
+        print(f"[mTLS] Using client certificate: {client_cert}")
+    elif args.client_cert or args.client_key:
+        print("Warning: Both --client-cert and --client-key required for mTLS")
     
     # Create verifier
     verifier = SGXTDXVerifier(
@@ -346,6 +369,8 @@ def main():
         tdx_port=args.tdx_port,
         ca_cert=ca_cert,
         verify_cert=not args.no_verify,
+        client_cert=client_cert,
+        client_key=client_key,
         verbose=args.verbose
     )
     

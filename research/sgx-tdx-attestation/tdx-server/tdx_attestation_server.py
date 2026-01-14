@@ -47,16 +47,21 @@ from common.protocol import (
 
 class TDXAttestationServer:
     """
-    TLS server for TDX attestation challenge-response.
+    TLS server for TDX attestation challenge-response with mTLS support.
     
     Handles requests from SGX enclave to attest the TDX VM.
+    When require_client_cert is True, only clients with valid certificates
+    signed by the CA can connect (mTLS).
     """
     
-    def __init__(self, port: int, cert_file: str, key_file: str, config_path: str):
+    def __init__(self, port: int, cert_file: str, key_file: str, config_path: str,
+                 ca_cert_file: str = None, require_client_cert: bool = False):
         self.port = port
         self.cert_file = cert_file
         self.key_file = key_file
         self.config_path = config_path
+        self.ca_cert_file = ca_cert_file
+        self.require_client_cert = require_client_cert
         self.running = False
         
         # Statistics
@@ -64,6 +69,7 @@ class TDXAttestationServer:
             "requests": 0,
             "successful": 0,
             "failed": 0,
+            "rejected_no_cert": 0,
             "start_time": None
         }
         
@@ -84,6 +90,13 @@ class TDXAttestationServer:
             raise RuntimeError(f"Certificate not found: {self.cert_file}")
         if not os.path.exists(self.key_file):
             raise RuntimeError(f"Private key not found: {self.key_file}")
+        
+        # Check CA certificate for mTLS
+        if self.require_client_cert:
+            if not self.ca_cert_file:
+                raise RuntimeError("CA certificate required for mTLS (--require-client-cert)")
+            if not os.path.exists(self.ca_cert_file):
+                raise RuntimeError(f"CA certificate not found: {self.ca_cert_file}")
         
         # Check trustauthority-cli
         result = subprocess.run(["which", "trustauthority-cli"], 
@@ -223,9 +236,14 @@ class TDXAttestationServer:
         print()
     
     def run(self):
-        """Start the attestation server"""
-        # Create TLS context
-        tls_context = create_tls_context_server(self.cert_file, self.key_file)
+        """Start the attestation server with optional mTLS"""
+        # Create TLS context (with mTLS if configured)
+        tls_context = create_tls_context_server(
+            self.cert_file, 
+            self.key_file,
+            ca_cert_file=self.ca_cert_file,
+            require_client_cert=self.require_client_cert
+        )
         
         # Create socket
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -265,9 +283,14 @@ class TDXAttestationServer:
         print(f"Protocol Version: {PROTOCOL_VERSION}")
         print(f"Port:             {self.port}")
         print(f"TLS Certificate:  {self.cert_file}")
+        print(f"mTLS Enabled:     {self.require_client_cert}")
+        if self.require_client_cert:
+            print(f"CA Certificate:   {self.ca_cert_file}")
         print(f"Config:           {self.config_path}")
         print(f"Started:          {self.stats['start_time']}")
         print("=" * 70)
+        if self.require_client_cert:
+            print("\n[SECURE] Only clients with valid certificates can connect.")
         print("\nWaiting for attestation challenges from SGX enclave...\n")
     
     def _print_stats(self):
@@ -278,6 +301,8 @@ class TDXAttestationServer:
         print(f"Total requests:  {self.stats['requests']}")
         print(f"Successful:      {self.stats['successful']}")
         print(f"Failed:          {self.stats['failed']}")
+        if self.require_client_cert:
+            print(f"Rejected (no cert): {self.stats['rejected_no_cert']}")
         print("=" * 70)
 
 
@@ -375,6 +400,10 @@ def main():
                        help="TLS certificate file")
     parser.add_argument("--key", default="../certs/server.key",
                        help="TLS private key file")
+    parser.add_argument("--ca-cert", default="../certs/ca.crt",
+                       help="CA certificate for client verification (mTLS)")
+    parser.add_argument("--require-client-cert", action="store_true",
+                       help="Require client certificate (mTLS) - only SGX enclave can connect")
     parser.add_argument("--config", default=os.path.expanduser("~/config.json"),
                        help="Intel Trust Authority config file")
     parser.add_argument("--test", action="store_true",
@@ -389,13 +418,16 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     cert_file = os.path.join(script_dir, args.cert) if not os.path.isabs(args.cert) else args.cert
     key_file = os.path.join(script_dir, args.key) if not os.path.isabs(args.key) else args.key
+    ca_cert_file = os.path.join(script_dir, args.ca_cert) if not os.path.isabs(args.ca_cert) else args.ca_cert
     
     try:
         server = TDXAttestationServer(
             port=args.port,
             cert_file=cert_file,
             key_file=key_file,
-            config_path=args.config
+            config_path=args.config,
+            ca_cert_file=ca_cert_file if args.require_client_cert else None,
+            require_client_cert=args.require_client_cert
         )
         server.run()
     except KeyboardInterrupt:

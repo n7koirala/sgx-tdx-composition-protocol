@@ -2,12 +2,12 @@
 
 ## Current State vs. Required State
 
-| Feature | Current Code | Required |
-|---------|-------------|----------|
-| RA restricted to SGX only | ❌ No - binds to `0.0.0.0` | ✅ Yes |
-| Client authentication | ❌ None | ✅ mTLS with SGX certificate |
-| SSH through SGX only | ❌ Not implemented | ✅ Required |
-| IP whitelist | ❌ None | ✅ Optional fallback |
+| Feature | Status | Implementation |
+|---------|--------|----------------|
+| RA restricted to SGX only | ✅ Implemented | `--require-client-cert` flag on TDX server |
+| Client authentication | ✅ Implemented | mTLS with SGX client certificate |
+| SSH through SGX only | ⚠️ Via firewall | GCP firewall rule restricts to SGX IP |
+| IP whitelist | ⚠️ Optional | GCP firewall provides this layer |
 
 ---
 
