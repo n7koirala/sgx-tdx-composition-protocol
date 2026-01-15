@@ -1,0 +1,152 @@
+# Gramine Manifest Template for SGX Gateway Server
+#
+# This manifest configures Python to run inside an SGX enclave with:
+# - Network socket support (TCP/TLS for command reception)
+# - SSH client support (for executing commands on TDX VMs)
+# - Cryptographic libraries for signature verification
+# - Sealed storage for audit logs
+#
+# Compatible with Gramine 1.9+
+
+# Gramine libos entrypoint - the Python interpreter
+libos.entrypoint = "{{ python_path }}"
+
+# Loader configuration
+loader.log_level = "{{ log_level }}"
+
+# Pass command line arguments
+loader.insecure__use_cmdline_argv = true
+
+# Environment variables
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/{{ arch_libdir }}"
+loader.env.PATH = "/bin:/usr/bin"
+loader.env.HOME = "/home/user"
+loader.env.PYTHONPATH = "/app:/app/common"
+
+# =============================================================================
+# Filesystem Mounts
+# =============================================================================
+
+fs.mounts = [
+    # Gramine runtime libraries
+    { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+    
+    # System libraries
+    { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+    { path = "/usr/{{ arch_libdir }}", uri = "file:/usr/{{ arch_libdir }}" },
+    { path = "/usr/lib", uri = "file:/usr/lib" },
+    
+    # Python installation
+    { path = "{{ python_path }}", uri = "file:{{ python_path }}" },
+    { path = "/usr/lib/python{{ python_version }}", uri = "file:/usr/lib/python{{ python_version }}" },
+    { path = "/usr/lib/python3/dist-packages", uri = "file:/usr/lib/python3/dist-packages" },
+    { path = "/usr/lib/python3", uri = "file:/usr/lib/python3" },
+    
+    # System config files (for networking)
+    { path = "/etc", uri = "file:/etc" },
+    
+    # SSH directory (for known_hosts, etc.)
+    { path = "/home/user/.ssh", uri = "file:{{ home_dir }}/.ssh" },
+    
+    # Application directory
+    { path = "/app", uri = "file:{{ app_dir }}" },
+    
+    # Sealed storage for audit logs (encrypted by SGX)
+    { type = "encrypted", path = "/sealed", uri = "file:{{ app_dir }}/sealed", key_name = "_sgx_mrenclave" },
+    
+    # Temporary filesystem
+    { type = "tmpfs", path = "/tmp" },
+]
+
+# =============================================================================
+# SGX-specific configuration
+# =============================================================================
+
+# Enable SGX remote attestation using DCAP
+sgx.remote_attestation = "dcap"
+
+# Debug mode (set to false in production!)
+sgx.debug = true
+
+# Enclave size - needs enough for Python + SSH + crypto
+sgx.enclave_size = "1G"
+
+# Maximum number of threads
+sgx.max_threads = 32
+
+# ISV configuration (for attestation identity)
+sgx.isvprodid = 2
+sgx.isvsvn = 1
+
+# Allow eventfd for async IO
+sys.insecure__allow_eventfd = true
+
+# =============================================================================
+# Trusted Files - files that are measured and included in MRENCLAVE
+# =============================================================================
+
+sgx.trusted_files = [
+    # Python interpreter
+    "file:{{ python_path }}",
+    
+    # Gramine runtime
+    "file:{{ gramine.runtimedir() }}/",
+    
+    # System libraries
+    "file:{{ arch_libdir }}/",
+    "file:/usr/{{ arch_libdir }}/",
+    
+    # Python standard library and packages
+    "file:/usr/lib/python{{ python_version }}/",
+    "file:/usr/lib/python3/dist-packages/",
+    "file:/usr/lib/python3/",
+    
+    # Application code
+    "file:{{ app_dir }}/sgx-gateway/",
+    "file:{{ app_dir }}/common/",
+    
+    # ASP Registry (critical - determines who can execute commands)
+    "file:{{ app_dir }}/config/asp_registry.json",
+    
+    # SSL/TLS certificates (system CA bundle)
+    "file:/etc/ssl/certs/",
+    "file:/usr/share/ca-certificates/",
+]
+
+# =============================================================================
+# Allowed Files - files that can be accessed but are NOT measured
+# =============================================================================
+
+sgx.allowed_files = [
+    # Network configuration
+    "file:/etc/nsswitch.conf",
+    "file:/etc/host.conf",
+    "file:/etc/resolv.conf",
+    "file:/etc/hosts",
+    "file:/etc/localtime",
+    "file:/etc/passwd",
+    "file:/etc/group",
+    "file:/etc/gai.conf",
+    
+    # SSH configuration
+    "file:{{ home_dir }}/.ssh/",
+    
+    # TLS certificates for mTLS
+    "file:{{ app_dir }}/certs/",
+    
+    # Log directory (for non-sealed logs)
+    "file:{{ app_dir }}/logs/",
+]
+
+# =============================================================================
+# System settings
+# =============================================================================
+
+# Increase stack size for Python
+sys.stack.size = "2M"
+
+# Allow SIGTERM injection
+sys.enable_sigterm_injection = true
+
+# Enable extra runtime domain names configuration
+sys.enable_extra_runtime_domain_names_conf = true

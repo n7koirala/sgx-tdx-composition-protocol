@@ -1,0 +1,13 @@
+{
+    "description": "ASP Registry - Maps ASP public keys to their allowed TDX VMs",
+    "version": "1.0",
+    "asp_registry": [
+        {
+            "asp_id": "asp-demo-001",
+            "name": "Demo ASP (for testing)",
+            "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn/ygWyF8Z5r5d\nxMfL1N7S/1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRS\n-----END PUBLIC KEY-----",
+            "allowed_vms": ["146.148.46.72"],
+            "notes": "Replace public_key_pem with actual ASP public key"
+        }
+    ]
+}
