@@ -118,7 +118,8 @@ sgx.allowed_files = [
     "file:/etc/group",
     "file:/etc/gai.conf",
     
-    # Allow custom CA certificate for TDX server
+    # Certificate directory (contains CA cert, client cert, and client key for mTLS)
+    # These files are needed for mutual TLS authentication with TDX server
     "file:{{ app_dir }}/certs/",
 ]
 

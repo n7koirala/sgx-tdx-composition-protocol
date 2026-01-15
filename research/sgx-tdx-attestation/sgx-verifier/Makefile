@@ -25,6 +25,11 @@ LOG_LEVEL ?= error
 TDX_HOST ?= localhost
 TDX_PORT ?= 8443
 
+# mTLS configuration (client certificate for SGX enclave identity)
+CA_CERT ?= /app/certs/ca.crt
+CLIENT_CERT ?= /app/certs/sgx_client.crt
+CLIENT_KEY ?= /app/certs/sgx_client.key
+
 # ============================================================================
 # Targets
 # ============================================================================
@@ -56,6 +61,7 @@ help:
 	@echo "  APP_DIR        = $(APP_DIR)"
 	@echo "  TDX_HOST       = $(TDX_HOST)"
 	@echo "  TDX_PORT       = $(TDX_PORT)"
+	@echo "  CLIENT_CERT    = $(CLIENT_CERT)"
 	@echo ""
 	@echo "Example:"
 	@echo "  make run-sgx TDX_HOST=192.168.1.100 TDX_PORT=8443"
@@ -98,38 +104,45 @@ $(SGX_SIGNING_KEY):
 # Run Targets
 # ============================================================================
 
-# Run inside SGX enclave
+# Run inside SGX enclave (with mTLS)
 run-sgx: all
 	@echo ""
-	@echo "Running TDX verifier inside SGX enclave..."
+	@echo "Running TDX verifier inside SGX enclave (mTLS enabled)..."
 	@echo "Target: $(TDX_HOST):$(TDX_PORT)"
+	@echo "Client Cert: $(CLIENT_CERT)"
 	@echo "========================================"
 	gramine-sgx ./verifier /app/sgx-verifier/sgx_tdx_verifier.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
-		--ca-cert /app/certs/ca.crt \
+		--ca-cert $(CA_CERT) \
+		--client-cert $(CLIENT_CERT) \
+		--client-key $(CLIENT_KEY) \
 		--verbose
 
-# Run without SGX (direct mode)
+# Run without SGX (direct mode, with mTLS)
 run-direct: verifier.manifest
 	@echo ""
-	@echo "Running TDX verifier in direct mode..."
+	@echo "Running TDX verifier in direct mode (mTLS enabled)..."
 	@echo "========================================"
 	gramine-direct ./verifier /app/sgx-verifier/sgx_tdx_verifier.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
-		--no-verify \
+		--ca-cert $(CA_CERT) \
+		--client-cert $(CLIENT_CERT) \
+		--client-key $(CLIENT_KEY) \
 		--verbose
 
 # Run without Gramine at all (pure Python, for testing)
 run-python:
 	@echo ""
-	@echo "Running TDX verifier in pure Python mode..."
+	@echo "Running TDX verifier in pure Python mode (mTLS enabled)..."
 	@echo "============================================"
 	PYTHONPATH=$(APP_DIR) python3 sgx_tdx_verifier.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
-		--no-verify \
+		--ca-cert ../certs/ca.crt \
+		--client-cert ../certs/sgx_client.crt \
+		--client-key ../certs/sgx_client.key \
 		--verbose
 
 # Test network connectivity
@@ -179,6 +192,8 @@ check-setup:
 	@echo ""
 	@echo "[7] Certificates:"
 	@test -f ../certs/ca.crt && echo "   ✓ CA certificate found" || echo "   ✗ CA certificate not found (run: make gen-certs)"
+	@test -f ../certs/sgx_client.crt && echo "   ✓ SGX client certificate found" || echo "   ✗ SGX client certificate not found (run: make gen-certs)"
+	@test -f ../certs/sgx_client.key && echo "   ✓ SGX client key found" || echo "   ✗ SGX client key not found (run: make gen-certs)"
 	@echo ""
 
 # ============================================================================
