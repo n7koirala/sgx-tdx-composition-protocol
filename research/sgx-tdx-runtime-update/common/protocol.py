@@ -158,7 +158,10 @@ class ASPInfo:
     
     @classmethod
     def from_dict(cls, data: dict) -> 'ASPInfo':
-        return cls(**data)
+        # Only pass known fields to avoid errors from extra fields like 'notes'
+        known_fields = {'asp_id', 'name', 'public_key_pem', 'allowed_vms'}
+        filtered_data = {k: v for k, v in data.items() if k in known_fields}
+        return cls(**filtered_data)
 
 
 @dataclass
