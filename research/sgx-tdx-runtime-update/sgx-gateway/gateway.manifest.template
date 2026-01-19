@@ -51,9 +51,6 @@ fs.mounts = [
     # Application directory
     { path = "/app", uri = "file:{{ app_dir }}" },
     
-    # Sealed storage for audit logs (encrypted by SGX)
-    { type = "encrypted", path = "/sealed", uri = "file:{{ app_dir }}/sealed", key_name = "_sgx_mrenclave" },
-    
     # Temporary filesystem
     { type = "tmpfs", path = "/tmp" },
 ]

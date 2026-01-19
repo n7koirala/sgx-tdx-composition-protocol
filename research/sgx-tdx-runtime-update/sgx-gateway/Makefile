@@ -115,7 +115,7 @@ run-sgx: all
 		--registry /app/config/asp_registry.json \
 		--ssh-key /app/certs/enclave_ssh_key \
 		--signing-key /app/certs/enclave_signing_key.pem \
-		--log-dir /sealed/logs
+		--log-dir /app/logs
 
 # Run in direct mode (no SGX)
 run-direct: gateway.manifest
