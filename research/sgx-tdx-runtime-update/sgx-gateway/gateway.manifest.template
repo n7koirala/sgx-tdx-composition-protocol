@@ -22,6 +22,7 @@ loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/{{ arch_libdi
 loader.env.PATH = "/bin:/usr/bin"
 loader.env.HOME = "/home/user"
 loader.env.PYTHONPATH = "/app:/app/common"
+loader.env.PYTHONUNBUFFERED = "1"
 
 # =============================================================================
 # Filesystem Mounts

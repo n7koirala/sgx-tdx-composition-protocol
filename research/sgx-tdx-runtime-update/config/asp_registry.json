@@ -3,10 +3,12 @@
     "version": "1.0",
     "asp_registry": [
         {
-            "asp_id": "asp-demo-001",
+            "asp_id": "my-asp",
             "name": "Demo ASP (for testing)",
-            "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0Z3VS5JJcds3xfn/ygWyF8Z5r5d\nxMfL1N7S/1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRS\n-----END PUBLIC KEY-----",
-            "allowed_vms": ["146.148.46.72"],
+            "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo1P0LywTat7KIO95Ja/z\nCVME1Bp+mv5ksTn4cdJzYv0KmZ2alT+s62Bc81Y5df8qUDakHAQHtOeQ/Ynf7ZtQ\nW4wwea/GPBw0x2a07b4aNRRLy4oOtBHBXuc2y97P3OnQ9LE/GgBkltR9C0JyYFVI\nclhGFpf3C084kRpJNS59KwnzojP8BB+g3fjtAHJCBGD7YCz6Bw40fFvwUQT8E0BT\n2uDn1G2Vy9BqfQNF7piJ7KdejfdbZ1oa5hIKzxgEd00WUZU62GYx+e0LnflkEzxy\n8YfZH0ipExuyCmLsDAyVPGz0uFf3VYeBIZaa8v5wpDYRIJlmPugkyECtGu0x9qXt\nrwIDAQAB\n-----END PUBLIC KEY-----\n",
+            "allowed_vms": [
+                "146.148.46.72"
+            ],
             "notes": "Replace public_key_pem with actual ASP public key"
         }
     ]
