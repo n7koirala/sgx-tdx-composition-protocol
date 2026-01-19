@@ -300,7 +300,7 @@ def main():
         description="ASP Client - Execute commands on TDX VMs through SGX Gateway"
     )
     
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    subparsers = parser.add_subparsers(dest="subcommand", help="Commands")
     
     # generate-keys command
     gen_parser = subparsers.add_parser("generate-keys", help="Generate ASP key pair")
@@ -335,11 +335,11 @@ def main():
     
     args = parser.parse_args()
     
-    if args.command == "generate-keys":
+    if args.subcommand == "generate-keys":
         sys.exit(cmd_generate_keys(args))
-    elif args.command == "execute":
+    elif args.subcommand == "execute":
         sys.exit(cmd_execute(args))
-    elif args.command == "get-logs":
+    elif args.subcommand == "get-logs":
         sys.exit(cmd_get_logs(args))
     else:
         parser.print_help()
