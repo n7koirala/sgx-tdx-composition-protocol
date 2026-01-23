@@ -55,12 +55,3 @@ $$
 - Horizontal scaling of controllers
 
 ---
-
-## Target Venues
-
-| Venue | Fit | Focus |
-|-------|-----|-------|
-| **USENIX Security** | ⭐⭐⭐ | Systems security, novel attestation |
-| **CCS** | ⭐⭐⭐ | Cryptographic protocols |
-| **NDSS** | ⭐⭐ | Network/distributed security |
-| **EuroS&P** | ⭐⭐ | European venue, systems |
