@@ -40,6 +40,7 @@ from common.protocol import (
 )
 from common.crypto import verify_signature, load_public_key_from_file
 from command_executor import CommandExecutor, SSHConfig
+from tdx_executor import TDXCommandExecutor
 from audit_logger import AuditLogger
 from common.transition_log import TransitionLogManager
 
@@ -159,25 +160,61 @@ class SGXGatewayServer:
         """
         Execute a verified command on the target TDX VM.
         
+        Supports two modes:
+        - TDX Server mode: connects to TDX Runtime Server (preferred)
+        - SSH mode: fallback via SSH
+        
         Args:
             cmd: The verified SignedCommand
         
         Returns:
             CommandResult with execution details
         """
-        # Create SSH config
+        # Try TDX server mode first (port 8446)
+        print(f"    Attempting TDX server connection to {cmd.target_vm}:8446...")
+        tdx_executor = TDXCommandExecutor(
+            host=cmd.target_vm,
+            port=8446,
+            controller_id=getattr(self, 'controller_id', 'sgx-controller-1'),
+            ca_cert=self.ca_cert_file,
+            timeout=5  # Quick timeout - fall back to SSH if TDX server not available
+        )
+        
+        success, exit_code, stdout, stderr, exec_time = tdx_executor.execute(
+            command=cmd.command,
+            asp_id=cmd.asp_id
+        )
+        
+        # If TDX server connection failed (exit_code=-1), fall back to SSH
+        if exit_code == -1:
+            print(f"    TDX server unavailable: {stderr[:50]}...")
+            print(f"    Falling back to SSH...")
+            return self._execute_via_ssh(cmd)
+        
+        print(f"    [TDX Server] Command executed")
+        return CommandResult(
+            success=success,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            execution_time_ms=exec_time
+        )
+    
+    def _execute_via_ssh(self, cmd: SignedCommand) -> CommandResult:
+        """Fallback: Execute command via SSH."""
+        print(f"    [SSH] Connecting to {cmd.target_vm} as nkoirala...")
         ssh_config = SSHConfig(
             host=cmd.target_vm,
-            username="nkoirala",  # Configure as needed
+            username="nkoirala",
             private_key_path=self.ssh_key_file
         )
         
-        # Execute
         executor = CommandExecutor(ssh_config)
         
         try:
             connected, error = executor.connect()
             if not connected:
+                print(f"    [SSH] Connection FAILED: {error}")
                 return CommandResult(
                     success=False,
                     exit_code=-1,
@@ -186,7 +223,14 @@ class SGXGatewayServer:
                     execution_time_ms=0.0
                 )
             
+            print(f"    [SSH] Connected! Executing command...")
             exit_code, stdout, stderr, exec_time = executor.execute(cmd.command)
+            
+            print(f"    [SSH] Command completed (exit_code={exit_code}, {exec_time:.1f}ms)")
+            if stdout:
+                print(f"    [SSH] stdout: {stdout[:100]}{'...' if len(stdout) > 100 else ''}")
+            if stderr:
+                print(f"    [SSH] stderr: {stderr[:100]}{'...' if len(stderr) > 100 else ''}")
             
             return CommandResult(
                 success=(exit_code == 0),

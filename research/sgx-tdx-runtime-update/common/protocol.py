@@ -265,7 +265,7 @@ def send_message(sock, message: str):
     sock.sendall(data)
 
 
-def receive_message(sock, timeout: float = 30.0) -> str:
+def receive_message(sock, timeout: float = 120.0) -> str:
     """Receive a framed message from socket."""
     sock.settimeout(timeout)
     buffer = b""
