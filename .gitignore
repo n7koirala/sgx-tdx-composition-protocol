@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# SGX/Gramine generated files
+*.manifest
+*.manifest.sgx
+*.sig
+
+# Certificates and keys (sensitive)
+*.crt
+*.key
+*.pem
+*.pub
+
+# SSH keys
+enclave_ssh_key
+enclave_ssh_key.pub
+
+# Generated keys directory
+keys/
+
+# Logs
+logs/
+*.log
+*.jsonl
+
+# Sealed data
+sealed/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
