@@ -41,6 +41,7 @@ from common.protocol import (
 from common.crypto import verify_signature, load_public_key_from_file
 from command_executor import CommandExecutor, SSHConfig
 from audit_logger import AuditLogger
+from common.transition_log import TransitionLogManager
 
 
 class SGXGatewayServer:
@@ -54,7 +55,8 @@ class SGXGatewayServer:
     def __init__(self, port: int, cert_file: str, key_file: str,
                  ca_cert_file: str, registry_file: str,
                  ssh_key_file: str, log_dir: str,
-                 signing_key_file: str = None):
+                 signing_key_file: str = None,
+                 controller_id: str = "sgx-controller-1"):
         
         self.port = port
         self.cert_file = cert_file
@@ -82,6 +84,15 @@ class SGXGatewayServer:
         # Initialize components
         self._load_asp_registry()
         self.audit_logger = AuditLogger(log_dir, signing_key_file)
+        
+        # Initialize hash-chained transition log for tracking CVM state changes
+        transition_log_dir = os.path.join(log_dir, "transitions")
+        self.transition_log_manager = TransitionLogManager(
+            storage_dir=transition_log_dir,
+            controller_id=controller_id
+        )
+        self.controller_id = controller_id
+        print(f"  Transition log initialized: {transition_log_dir}")
     
     def _load_asp_registry(self):
         """Load ASP registry from JSON file."""
@@ -241,7 +252,7 @@ class SGXGatewayServer:
         result = self.execute_command(cmd)
         self.stats["executed"] += 1
         
-        # Log the execution
+        # Log the execution in audit logger
         log_entry = self.audit_logger.log_command(
             asp_id=cmd.asp_id,
             target_vm=cmd.target_vm,
@@ -250,8 +261,19 @@ class SGXGatewayServer:
             result=result
         )
         
+        # Record in hash-chained transition log
+        transition_entry = self.transition_log_manager.record_transition(
+            cvm_id=cmd.target_vm,
+            command=cmd.command,
+            asp_id=cmd.asp_id,
+            asp_signature=cmd.signature,
+            result_success=result.success,
+            result_exit_code=result.exit_code
+        )
+        
         print(f"  ✓ Executed (exit_code={result.exit_code})")
         print(f"    Log ID: {log_entry.log_id}")
+        print(f"    Transition seq: {transition_entry.seq}, chain head: {transition_entry.entry_hash[:16]}...")
         
         return GatewayResponse(
             success=True,

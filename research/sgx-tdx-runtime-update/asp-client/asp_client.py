@@ -164,7 +164,7 @@ class ASPClient:
         
         # Connect
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(60)
+        sock.settimeout(120)  # Increased to allow for SSH operations
         
         tls_sock = tls_context.wrap_socket(sock, server_hostname=self.gateway_host)
         tls_sock.connect((self.gateway_host, self.gateway_port))
