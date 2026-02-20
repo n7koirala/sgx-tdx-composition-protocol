@@ -7,21 +7,23 @@ the SGX enclave. It implements the challenge-response protocol:
 
 1. Receives challenge with nonce from SGX enclave (over TLS)
 2. Generates TDX quote with nonce bound in report_data
-3. Gets attestation token from Intel Trust Authority
-4. Returns the token to SGX enclave
+3. Gets attestation token from Intel Trust Authority (ITA mode)
+   OR generates raw DCAP quote via libtdx_attest (DCAP mode)
+4. Returns the token/quote to SGX enclave
 
 Usage:
     python3 tdx_attestation_server.py [options]
     
     Options:
         --port PORT         Server port (default: 8443)
+        --method METHOD     Attestation method: ita or dcap (default: ita)
         --cert CERT_FILE    TLS certificate file (default: ../certs/server.crt)
         --key KEY_FILE      TLS private key file (default: ../certs/server.key)
         --config CONFIG     Trust Authority config (default: ~/config.json)
         --test              Run self-test mode
         
 Example:
-    python3 tdx_attestation_server.py --port 8443
+    python3 tdx_attestation_server.py --port 8443 --method dcap
 """
 
 import sys
@@ -33,6 +35,8 @@ import subprocess
 import json
 import base64
 import time
+import ctypes
+import ctypes.util
 from datetime import datetime
 
 # Add parent directory to path for common module
@@ -41,7 +45,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.protocol import (
     AttestationRequest, AttestationResponse, ProtocolError,
     create_tls_context_server, send_message, receive_message,
-    DEFAULT_PORT, PROTOCOL_VERSION
+    DEFAULT_PORT, PROTOCOL_VERSION, METHOD_ITA, METHOD_DCAP, VALID_METHODS,
+    parse_dcap_quote
 )
 
 
@@ -55,14 +60,19 @@ class TDXAttestationServer:
     """
     
     def __init__(self, port: int, cert_file: str, key_file: str, config_path: str,
-                 ca_cert_file: str = None, require_client_cert: bool = False):
+                 ca_cert_file: str = None, require_client_cert: bool = False,
+                 method: str = METHOD_ITA):
         self.port = port
         self.cert_file = cert_file
         self.key_file = key_file
         self.config_path = config_path
         self.ca_cert_file = ca_cert_file
         self.require_client_cert = require_client_cert
+        self.method = method
         self.running = False
+        
+        # libtdx_attest library handle (for DCAP mode)
+        self._tdx_lib = None
         
         # Statistics
         self.stats = {
@@ -76,14 +86,10 @@ class TDXAttestationServer:
         self._verify_setup()
     
     def _verify_setup(self):
-        """Verify TDX and Trust Authority are available"""
+        """Verify TDX and attestation dependencies are available"""
         # Check TDX device
         if not os.path.exists("/dev/tdx_guest"):
             raise RuntimeError("TDX device not found: /dev/tdx_guest")
-        
-        # Check config file
-        if not os.path.exists(self.config_path):
-            raise RuntimeError(f"Trust Authority config not found: {self.config_path}")
         
         # Check certificates
         if not os.path.exists(self.cert_file):
@@ -98,11 +104,61 @@ class TDXAttestationServer:
             if not os.path.exists(self.ca_cert_file):
                 raise RuntimeError(f"CA certificate not found: {self.ca_cert_file}")
         
-        # Check trustauthority-cli
-        result = subprocess.run(["which", "trustauthority-cli"], 
-                               capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError("trustauthority-cli not found in PATH")
+        # Method-specific checks
+        if self.method == METHOD_ITA:
+            # Check config file
+            if not os.path.exists(self.config_path):
+                raise RuntimeError(f"Trust Authority config not found: {self.config_path}")
+            # Check trustauthority-cli
+            result = subprocess.run(["which", "trustauthority-cli"], 
+                                   capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError("trustauthority-cli not found in PATH")
+        
+        elif self.method == METHOD_DCAP:
+            # Check libtdx_attest
+            self._tdx_lib = self._load_libtdx_attest()
+            if self._tdx_lib is None:
+                raise RuntimeError(
+                    "libtdx_attest.so not found. Install with:\n"
+                    "  sudo bash install_dcap_packages.sh")
+    
+    def _load_libtdx_attest(self):
+        """Load the libtdx_attest shared library for DCAP quote generation."""
+        lib_paths = [
+            "libtdx_attest.so",
+            "libtdx_attest.so.1",
+            ctypes.util.find_library("tdx_attest"),
+        ]
+        
+        for path in lib_paths:
+            if path is None:
+                continue
+            try:
+                lib = ctypes.CDLL(path)
+                
+                # Define function signatures
+                lib.tdx_att_get_quote.restype = ctypes.c_int
+                lib.tdx_att_get_quote.argtypes = [
+                    ctypes.c_void_p,   # report_data
+                    ctypes.c_void_p,   # att_key_id_list
+                    ctypes.c_uint32,   # list_size
+                    ctypes.c_void_p,   # att_key_id out
+                    ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)),  # pp_quote
+                    ctypes.POINTER(ctypes.c_uint32),  # p_quote_size
+                    ctypes.c_uint32,   # flags
+                ]
+                
+                lib.tdx_att_free_quote.restype = None
+                lib.tdx_att_free_quote.argtypes = [
+                    ctypes.POINTER(ctypes.c_uint8),
+                ]
+                
+                return lib
+            except OSError:
+                continue
+        
+        return None
     
     def get_tdx_token(self, nonce: str) -> tuple:
         """
@@ -142,6 +198,58 @@ class TDXAttestationServer:
         
         return token_str, mrtd
     
+    def get_tdx_quote_dcap(self, nonce: str) -> tuple:
+        """
+        Generate TDX quote using libtdx_attest (DCAP mode).
+        
+        The nonce is decoded from base64 and written directly into
+        the TDX report_data (64 bytes, zero-padded).
+        
+        Args:
+            nonce: Base64-encoded nonce from SGX enclave
+        
+        Returns:
+            Tuple of (raw_quote_bytes, mrtd_hex)
+        """
+        if self._tdx_lib is None:
+            raise RuntimeError("libtdx_attest not loaded")
+        
+        # Decode nonce and prepare 64-byte report_data
+        nonce_bytes = base64.b64decode(nonce)
+        report_data = nonce_bytes + b'\x00' * (64 - len(nonce_bytes))
+        report_data = report_data[:64]  # Ensure exactly 64 bytes
+        
+        # Create report_data buffer
+        rd_buf = (ctypes.c_uint8 * 64)(*report_data)
+        
+        # Output pointers
+        pp_quote = ctypes.POINTER(ctypes.c_uint8)()
+        quote_size = ctypes.c_uint32(0)
+        
+        # Call tdx_att_get_quote
+        ret = self._tdx_lib.tdx_att_get_quote(
+            ctypes.byref(rd_buf),
+            None, 0, None,
+            ctypes.byref(pp_quote),
+            ctypes.byref(quote_size),
+            0,
+        )
+        
+        if ret != 0:
+            raise RuntimeError(f"tdx_att_get_quote failed: error {ret} (0x{ret:08x})")
+        
+        # Copy quote bytes
+        size = quote_size.value
+        quote_bytes = bytes(pp_quote[:size])
+        
+        # Free the quote buffer
+        self._tdx_lib.tdx_att_free_quote(pp_quote)
+        
+        # Extract MRTD from parsed quote
+        info = parse_dcap_quote(quote_bytes)
+        
+        return quote_bytes, info.mrtd
+    
     def _extract_mrtd(self, token: str) -> str:
         """Extract MRTD from JWT token payload"""
         try:
@@ -158,6 +266,9 @@ class TDXAttestationServer:
         """
         Handle an attestation request.
         
+        Routes to ITA or DCAP based on the server's configured method,
+        or the request's attestation_method field.
+        
         Args:
             request_json: JSON string of AttestationRequest
         
@@ -173,16 +284,31 @@ class TDXAttestationServer:
             if not valid:
                 return AttestationResponse.error_response(error).to_json()
             
-            # Get TDX token with nonce binding
-            token, mrtd = self.get_tdx_token(request.nonce)
+            # Use the server's method (override request method with server method)
+            method = self.method
             
-            # Create response
-            response = AttestationResponse(
-                status="success",
-                token=token,
-                nonce_echo=request.nonce,
-                mrtd=mrtd
-            )
+            if method == METHOD_DCAP:
+                # DCAP mode: generate raw quote via libtdx_attest
+                quote_bytes, mrtd = self.get_tdx_quote_dcap(request.nonce)
+                
+                response = AttestationResponse(
+                    status="success",
+                    nonce_echo=request.nonce,
+                    mrtd=mrtd,
+                    attestation_method=METHOD_DCAP,
+                    raw_quote=base64.b64encode(quote_bytes).decode('ascii'),
+                )
+            else:
+                # ITA mode: get JWT token from Intel Trust Authority
+                token, mrtd = self.get_tdx_token(request.nonce)
+                
+                response = AttestationResponse(
+                    status="success",
+                    token=token,
+                    nonce_echo=request.nonce,
+                    mrtd=mrtd,
+                    attestation_method=METHOD_ITA,
+                )
             
             self.stats["successful"] += 1
             return response.to_json()
@@ -282,11 +408,13 @@ class TDXAttestationServer:
         print("=" * 70)
         print(f"Protocol Version: {PROTOCOL_VERSION}")
         print(f"Port:             {self.port}")
+        print(f"Method:           {self.method.upper()} ({'Intel Trust Authority' if self.method == METHOD_ITA else 'Local DCAP (libtdx_attest)'})")
         print(f"TLS Certificate:  {self.cert_file}")
         print(f"mTLS Enabled:     {self.require_client_cert}")
         if self.require_client_cert:
             print(f"CA Certificate:   {self.ca_cert_file}")
-        print(f"Config:           {self.config_path}")
+        if self.method == METHOD_ITA:
+            print(f"Config:           {self.config_path}")
         print(f"Started:          {self.stats['start_time']}")
         print("=" * 70)
         if self.require_client_cert:
@@ -405,7 +533,9 @@ def main():
     parser.add_argument("--require-client-cert", action="store_true",
                        help="Require client certificate (mTLS) - only SGX enclave can connect")
     parser.add_argument("--config", default=os.path.expanduser("~/config.json"),
-                       help="Intel Trust Authority config file")
+                        help="Intel Trust Authority config file")
+    parser.add_argument("--method", choices=[METHOD_ITA, METHOD_DCAP], default=METHOD_ITA,
+                        help=f"Attestation method: {METHOD_ITA} (cloud) or {METHOD_DCAP} (local). Default: {METHOD_ITA}")
     parser.add_argument("--test", action="store_true",
                        help="Run self-test mode")
     
@@ -427,7 +557,8 @@ def main():
             key_file=key_file,
             config_path=args.config,
             ca_cert_file=ca_cert_file if args.require_client_cert else None,
-            require_client_cert=args.require_client_cert
+            require_client_cert=args.require_client_cert,
+            method=args.method
         )
         server.run()
     except KeyboardInterrupt:

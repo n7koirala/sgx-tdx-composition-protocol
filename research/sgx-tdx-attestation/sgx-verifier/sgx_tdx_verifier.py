@@ -10,11 +10,12 @@ Protocol Flow:
     1. Generate cryptographic nonce
     2. Connect to TDX attestation server over TLS
     3. Send attestation challenge with nonce
-    4. Receive TDX attestation token (JWT)
-    5. Verify token:
-       - Issuer is Intel Trust Authority
-       - Token not expired
-       - Nonce is bound in report_data
+    4. Receive TDX attestation response:
+       - ITA mode:  JWT token from Intel Trust Authority
+       - DCAP mode: Raw TDX quote (locally verified)
+    5. Verify:
+       - ITA:  JWT issuer, expiry, nonce binding
+       - DCAP: ECDSA signature, nonce binding in report_data
     6. Output verification verdict
 
 Usage (inside SGX enclave):
@@ -23,6 +24,7 @@ Usage (inside SGX enclave):
 Options:
     --tdx-host HOST     TDX server hostname/IP (required)
     --tdx-port PORT     TDX server port (default: 8443)
+    --method METHOD     Attestation method: ita or dcap (default: ita)
     --ca-cert FILE      CA certificate for TLS verification
     --no-verify         Skip TLS certificate verification
     --test-network      Test network connectivity only
@@ -36,6 +38,7 @@ import ssl
 import argparse
 import time
 import json
+import base64
 from datetime import datetime
 
 # Add parent directory to path for common module
@@ -44,8 +47,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.protocol import (
     AttestationRequest, AttestationResponse, VerificationResult,
     generate_nonce, verify_nonce_binding, verify_jwt_simple, decode_jwt_payload,
+    verify_dcap_quote,
     create_tls_context_client, send_message, receive_message,
-    DEFAULT_PORT, PROTOCOL_VERSION, ProtocolError
+    DEFAULT_PORT, PROTOCOL_VERSION, ProtocolError,
+    METHOD_ITA, METHOD_DCAP, VALID_METHODS
 )
 
 
@@ -63,7 +68,7 @@ class SGXTDXVerifier:
     def __init__(self, tdx_host: str, tdx_port: int,
                  ca_cert: str = None, verify_cert: bool = True,
                  client_cert: str = None, client_key: str = None,
-                 verbose: bool = False):
+                 verbose: bool = False, method: str = METHOD_ITA):
         self.tdx_host = tdx_host
         self.tdx_port = tdx_port
         self.ca_cert = ca_cert
@@ -71,6 +76,7 @@ class SGXTDXVerifier:
         self.client_cert = client_cert
         self.client_key = client_key
         self.verbose = verbose
+        self.method = method
     
     def log(self, msg: str):
         """Log message if verbose mode enabled"""
@@ -110,9 +116,9 @@ class SGXTDXVerifier:
             self.log("TLS connection established")
             
             try:
-                # Step 3: Send attestation request
-                request = AttestationRequest(nonce=nonce)
-                self.log("Sending attestation request...")
+                # Step 3: Send attestation request with method
+                request = AttestationRequest(nonce=nonce, attestation_method=self.method)
+                self.log(f"Sending attestation request (method={self.method})...")
                 send_message(tls_sock, request.to_json())
                 
                 # Step 4: Receive response
@@ -125,11 +131,17 @@ class SGXTDXVerifier:
                     result.verdict = "ERROR"
                     return result
                 
-                self.log(f"Received token ({len(response.token)} bytes)")
-                
-                # Step 5: Verify token
-                result = self._verify_token(response.token, nonce)
-                result.mrtd = response.mrtd
+                # Step 5: Verify based on attestation method
+                if response.attestation_method == METHOD_DCAP:
+                    self.log(f"Received DCAP quote ({len(response.raw_quote)} bytes base64)")
+                    quote_bytes = base64.b64decode(response.raw_quote)
+                    self.log(f"Decoded quote: {len(quote_bytes)} bytes")
+                    result = verify_dcap_quote(quote_bytes, nonce, debug=self.verbose)
+                    result.mrtd = response.mrtd
+                else:
+                    self.log(f"Received ITA token ({len(response.token)} bytes)")
+                    result = self._verify_token(response.token, nonce)
+                    result.mrtd = response.mrtd
                 
             finally:
                 tls_sock.close()
@@ -163,6 +175,7 @@ class SGXTDXVerifier:
         3. Nonce binding in report_data
         """
         result = VerificationResult()
+        result.attestation_method = METHOD_ITA
         
         # Verify JWT structure, issuer, and expiry
         self.log("Verifying JWT issuer and expiry...")
@@ -293,10 +306,18 @@ def print_result(result: VerificationResult):
     
     print(f"\n  Time: {result.verification_time_ms:.1f} ms")
     
+    # Show attestation method
+    method_label = "ITA (Intel Trust Authority)" if result.attestation_method == METHOD_ITA else "DCAP (Local Verification)"
+    print(f"\n  Method: {method_label}")
+    
     print("\n  Checks:")
-    print(f"    Issuer:  {'✓' if result.issuer_verified else '✗'}")
-    print(f"    Expiry:  {'✓' if result.expiry_verified else '✗'}")
-    print(f"    Nonce:   {'✓' if result.nonce_verified else '✗'}")
+    if result.attestation_method == METHOD_DCAP:
+        print(f"    Signature: {'✓' if result.signature_verified else '✗'} (ECDSA-P256)")
+        print(f"    Nonce:     {'✓' if result.nonce_verified else '✗'}")
+    else:
+        print(f"    Issuer:  {'✓' if result.issuer_verified else '✗'}")
+        print(f"    Expiry:  {'✓' if result.expiry_verified else '✗'}")
+        print(f"    Nonce:   {'✓' if result.nonce_verified else '✗'}")
     
     if result.mrtd:
         print(f"\n  TDX Measurements:")
@@ -334,8 +355,10 @@ def main():
                        help="Test network connectivity only")
     parser.add_argument("--verbose", "-v", action="store_true",
                        help="Enable verbose output")
+    parser.add_argument("--method", choices=[METHOD_ITA, METHOD_DCAP], default=METHOD_ITA,
+                        help=f"Attestation method: {METHOD_ITA} (cloud) or {METHOD_DCAP} (local). Default: {METHOD_ITA}")
     parser.add_argument("--json", action="store_true",
-                       help="Output result as JSON")
+                        help="Output result as JSON")
     
     args = parser.parse_args()
     
@@ -371,7 +394,8 @@ def main():
         verify_cert=not args.no_verify,
         client_cert=client_cert,
         client_key=client_key,
-        verbose=args.verbose
+        verbose=args.verbose,
+        method=args.method
     )
     
     if args.test_network:
@@ -379,7 +403,8 @@ def main():
         sys.exit(0 if success else 1)
     
     # Perform attestation
-    print(f"Attesting TDX server at {args.tdx_host}:{args.tdx_port}...")
+    method_label = "ITA" if args.method == METHOD_ITA else "DCAP"
+    print(f"Attesting TDX server at {args.tdx_host}:{args.tdx_port} (method: {method_label})...")
     result = verifier.attest_tdx()
     
     if args.json:

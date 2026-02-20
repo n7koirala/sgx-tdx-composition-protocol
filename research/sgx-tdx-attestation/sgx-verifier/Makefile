@@ -25,6 +25,14 @@ LOG_LEVEL ?= error
 TDX_HOST ?= localhost
 TDX_PORT ?= 8443
 
+# Attestation method: ita (Intel Trust Authority) or dcap (local DCAP)
+METHOD ?= ita
+
+# Multi-controller settings
+CONTROLLER_ID ?= ctrl-1
+CONTROLLER_PORT ?= 9001
+REFRESH_INTERVAL ?= 30
+
 # mTLS configuration (client certificate for SGX enclave identity)
 CA_CERT ?= /app/certs/ca.crt
 CLIENT_CERT ?= /app/certs/sgx_client.crt
@@ -34,7 +42,7 @@ CLIENT_KEY ?= /app/certs/sgx_client.key
 # Targets
 # ============================================================================
 
-.PHONY: all clean run-sgx run-direct test-network check-setup help
+.PHONY: all clean run-sgx run-direct run-controller run-controller-python test-network check-setup help
 
 # Default target
 all: verifier.manifest.sgx verifier.sig
@@ -44,27 +52,32 @@ help:
 	@echo "============================================"
 	@echo ""
 	@echo "Build Targets:"
-	@echo "  all           - Build the Gramine manifest and sign it"
-	@echo "  clean         - Remove generated files"
+	@echo "  all                    - Build the Gramine manifest and sign it"
+	@echo "  clean                  - Remove generated files"
 	@echo ""
-	@echo "Run Targets:"
-	@echo "  run-sgx       - Run verifier inside SGX enclave"
-	@echo "  run-direct    - Run verifier in direct mode (no SGX)"
-	@echo "  test-network  - Test network connectivity to TDX server"
+	@echo "Run Targets (single-shot verifier):"
+	@echo "  run-sgx                - Run verifier inside SGX enclave"
+	@echo "  run-direct             - Run verifier in direct mode (no SGX)"
+	@echo "  test-network           - Test network connectivity to TDX server"
+	@echo ""
+	@echo "Run Targets (multi-controller):"
+	@echo "  run-controller         - Run long-lived controller (SGX, serves end-users)"
+	@echo "  run-controller-python  - Run controller in pure Python (no Gramine)"
 	@echo ""
 	@echo "Setup:"
 	@echo "  check-setup   - Verify SGX and Gramine setup"
 	@echo "  gen-certs     - Generate TLS certificates"
 	@echo ""
 	@echo "Configuration:"
-	@echo "  PYTHON_VERSION = $(PYTHON_VERSION)"
-	@echo "  APP_DIR        = $(APP_DIR)"
-	@echo "  TDX_HOST       = $(TDX_HOST)"
-	@echo "  TDX_PORT       = $(TDX_PORT)"
-	@echo "  CLIENT_CERT    = $(CLIENT_CERT)"
+	@echo "  TDX_HOST          = $(TDX_HOST)"
+	@echo "  TDX_PORT          = $(TDX_PORT)"
+	@echo "  METHOD            = $(METHOD)"
+	@echo "  CONTROLLER_ID     = $(CONTROLLER_ID)"
+	@echo "  CONTROLLER_PORT   = $(CONTROLLER_PORT)"
+	@echo "  REFRESH_INTERVAL  = $(REFRESH_INTERVAL)s"
 	@echo ""
 	@echo "Example:"
-	@echo "  make run-sgx TDX_HOST=192.168.1.100 TDX_PORT=8443"
+	@echo "  make run-controller TDX_HOST=10.0.0.1 METHOD=dcap CONTROLLER_PORT=9001"
 
 # ============================================================================
 # Build Steps
@@ -108,12 +121,13 @@ $(SGX_SIGNING_KEY):
 run-sgx: all
 	@echo ""
 	@echo "Running TDX verifier inside SGX enclave (mTLS enabled)..."
-	@echo "Target: $(TDX_HOST):$(TDX_PORT)"
+	@echo "Target: $(TDX_HOST):$(TDX_PORT)  Method: $(METHOD)"
 	@echo "Client Cert: $(CLIENT_CERT)"
 	@echo "========================================"
 	gramine-sgx ./verifier /app/sgx-verifier/sgx_tdx_verifier.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
+		--method $(METHOD) \
 		--ca-cert $(CA_CERT) \
 		--client-cert $(CLIENT_CERT) \
 		--client-key $(CLIENT_KEY) \
@@ -127,6 +141,7 @@ run-direct: verifier.manifest
 	gramine-direct ./verifier /app/sgx-verifier/sgx_tdx_verifier.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
+		--method $(METHOD) \
 		--ca-cert $(CA_CERT) \
 		--client-cert $(CLIENT_CERT) \
 		--client-key $(CLIENT_KEY) \
@@ -140,6 +155,7 @@ run-python:
 	PYTHONPATH=$(APP_DIR) python3 sgx_tdx_verifier.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
+		--method $(METHOD) \
 		--ca-cert ../certs/ca.crt \
 		--client-cert ../certs/sgx_client.crt \
 		--client-key ../certs/sgx_client.key \
@@ -154,6 +170,45 @@ test-network: all
 		--tdx-port $(TDX_PORT) \
 		--no-verify \
 		--test-network
+
+# ============================================================================
+# Multi-Controller Targets
+# ============================================================================
+
+# Run controller inside SGX enclave (long-lived server)
+run-controller: all
+	@echo ""
+	@echo "Starting SGX controller $(CONTROLLER_ID) on port $(CONTROLLER_PORT)..."
+	@echo "TDX target: $(TDX_HOST):$(TDX_PORT)  Method: $(METHOD)"
+	@echo "========================================"
+	gramine-sgx ./verifier /app/sgx-verifier/sgx_controller.py \
+		--controller-id $(CONTROLLER_ID) \
+		--port $(CONTROLLER_PORT) \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--method $(METHOD) \
+		--cert /app/certs/server.crt \
+		--key /app/certs/server.key \
+		--no-verify-tdx \
+		--refresh-interval $(REFRESH_INTERVAL) \
+		--verbose
+
+# Run controller without Gramine (pure Python, for testing)
+run-controller-python:
+	@echo ""
+	@echo "Starting controller $(CONTROLLER_ID) in pure Python mode..."
+	@echo "========================================"
+	PYTHONPATH=$(APP_DIR) python3 sgx_controller.py \
+		--controller-id $(CONTROLLER_ID) \
+		--port $(CONTROLLER_PORT) \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--method $(METHOD) \
+		--cert ../certs/server.crt \
+		--key ../certs/server.key \
+		--no-verify-tdx \
+		--refresh-interval $(REFRESH_INTERVAL) \
+		--verbose
 
 # ============================================================================
 # Certificate Generation

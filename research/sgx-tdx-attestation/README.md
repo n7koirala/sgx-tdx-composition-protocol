@@ -2,6 +2,10 @@
 
 A research implementation of hierarchical TEE attestation where an **SGX enclave verifies TDX VM attestation**, establishing a chain of trust: `End User → SGX → TDX`.
 
+Supports two attestation methods:
+- **ITA** — Intel Trust Authority (cloud-based JWT verification)
+- **DCAP** — Local attestation via `libtdx_attest` (ECDSA signature verification, no cloud dependency)
+
 ## Overview
 
 ```
@@ -13,10 +17,11 @@ A research implementation of hierarchical TEE attestation where an **SGX enclave
 │   │    SGX ENCLAVE      │ ───────────────────────→ │     TDX VM      │  │
 │   │   (Owner/Verifier)  │       over TLS           │   (Attester)    │  │
 │   │                     │                          │                 │  │
-│   │  • Generates nonce  │     TDX Token (JWT)      │ • Generates     │  │
-│   │  • Verifies token   │ ←─────────────────────── │   quote         │  │
-│   │  • Issues verdict   │                          │ • Gets ITA      │  │
-│   └─────────────────────┘                          │   token         │  │
+│   │  • Generates nonce  │   ITA: JWT Token         │ • Generates     │  │
+│   │  • Verifies token   │   DCAP: Raw TDX Quote    │   TDX quote     │  │
+│   │    or DCAP quote    │ ←─────────────────────── │ • ITA: gets JWT │  │
+│   │  • Issues verdict   │                          │ • DCAP: returns │  │
+│   └─────────────────────┘                          │   raw quote     │  │
 │            │                                       └─────────────────┘  │
 │            │ SGX Quote                                                  │
 │            ▼                                                            │
@@ -83,26 +88,46 @@ This generates 6 files:
 
 ### 2. Start TDX Attestation Server (on TDX VM)
 
-**Standard mode (any client):**
+**ITA mode** (default — uses Intel Trust Authority cloud):
 ```bash
 cd tdx-server
-python3 tdx_attestation_server.py --port 8443
+python3 tdx_attestation_server.py --port 8443 --method ita
+```
+
+**DCAP mode** (local attestation via `libtdx_attest` — no cloud dependency):
+```bash
+cd tdx-server
+sudo python3 tdx_attestation_server.py --port 8443 --method dcap
 ```
 
 **Secure mode with mTLS (SGX enclave only):**
 ```bash
 cd tdx-server
-python3 tdx_attestation_server.py --port 8443 --require-client-cert
+sudo python3 tdx_attestation_server.py --port 8443 --method dcap --require-client-cert
 ```
 
 With `--require-client-cert`, only clients presenting a valid certificate signed by the CA can connect.
 
 ### 3. Run SGX Verifier (on SGX Machine)
 
-**Standard mode:**
+**ITA mode** (default):
 ```bash
 cd sgx-verifier
-make run-sgx TDX_HOST=<TDX_IP> TDX_PORT=8443
+python3 sgx_tdx_verifier.py --tdx-host <TDX_IP> --tdx-port 8443 --method ita --no-verify
+```
+
+**DCAP mode** (local ECDSA verification):
+```bash
+cd sgx-verifier
+python3 sgx_tdx_verifier.py --tdx-host <TDX_IP> --tdx-port 8443 --method dcap --no-verify -v
+
+```bash
+# SGX enclave mode with DCAP
+make run-sgx TDX_HOST=<TDX_IP> TDX_PORT=8443 METHOD=dcap
+# Direct mode (no SGX) with DCAP
+make run-direct TDX_HOST=<TDX_IP> TDX_PORT=8443 METHOD=dcap
+# Only Python with DCAP
+make run-python TDX_HOST=<TDX_IP> TDX_PORT=8443 METHOD=dcap
 ```
 
 **With mTLS authentication:**
@@ -111,10 +136,22 @@ cd sgx-verifier
 python3 sgx_tdx_verifier.py \
     --tdx-host <TDX_IP> \
     --tdx-port 8443 \
+    --method dcap \
     --ca-cert ../certs/ca.crt \
     --client-cert ../certs/sgx_client.crt \
     --client-key ../certs/sgx_client.key
 ```
+
+## Attestation Methods
+
+| Feature | ITA Mode | DCAP Mode |
+|---------|----------|----------|
+| **Quote generation** | `trustauthority-cli` | `libtdx_attest` (Intel DCAP library) |
+| **Verification** | Intel cloud returns signed JWT | Local ECDSA-P256 signature check |
+| **Cloud dependency** | Yes (per attestation) | No (fully local) |
+| **Latency** | ~600-1200ms (network round-trip) | ~43ms (local QE only) |
+| **Prerequisites** | `trustauthority-cli` + API key | `libtdx_attest.so` (Intel DCAP packages) |
+| **Privacy** | Platform IDs in JWT claims | Platform IDs in raw quote (stripped by SGX) |
 
 ## Protocol Details
 
@@ -124,20 +161,19 @@ python3 sgx_tdx_verifier.py \
 2. **SGX Enclave** connects to TDX server over TLS
 3. **SGX Enclave** sends attestation request:
    ```json
-   {"action": "attest", "nonce": "<base64>", "protocol_version": "1.0"}
+   {"action": "attest", "nonce": "<base64>", "attestation_method": "dcap", "protocol_version": "1.0"}
    ```
-4. **TDX Server** generates quote with nonce bound in `user_data`
-5. **TDX Server** obtains JWT token from Intel Trust Authority
-6. **TDX Server** returns response:
-   ```json
-   {"status": "success", "token": "<JWT>", "nonce_echo": "<nonce>", "mrtd": "..."}
-   ```
-7. **SGX Enclave** verifies:
-   - JWT issuer contains `trustauthority.intel.com`
-   - Token not expired
-   - Nonce properly bound in `report_data`
+4. **TDX Server** generates quote with nonce bound in `report_data`
+5. **TDX Server** responds based on method:
+   - **ITA**: Obtains JWT from Intel Trust Authority → `{"token": "<JWT>", "attestation_method": "ita", ...}`
+   - **DCAP**: Returns raw quote → `{"raw_quote": "<base64>", "attestation_method": "dcap", ...}`
+6. **SGX Enclave** verifies based on response method:
+   - **ITA**: JWT issuer + expiry + nonce binding in `report_data`
+   - **DCAP**: ECDSA-P256 signature + nonce binding in raw quote bytes
 
 ### Verification Checks
+
+**ITA Mode:**
 
 | Check | Description | Security Purpose |
 |-------|-------------|------------------|
@@ -145,51 +181,67 @@ python3 sgx_tdx_verifier.py \
 | Expiry | Token must not be expired | Freshness |
 | Nonce | Must match in report_data | Replay protection |
 
-### Token Fields Extracted
+**DCAP Mode:**
+
+| Check | Description | Security Purpose |
+|-------|-------------|------------------|
+| Signature | ECDSA-P256 over quote header + body | Authenticity |
+| Nonce | Nonce bytes in report_data (64 bytes) | Replay protection |
+| MRTD | Extracted from quote body | Integrity |
+
+### Fields Extracted
 
 - `MRTD` - TD Measurement (like SGX MRENCLAVE)
-- `TCB Status` - Platform security status
-- `Is Debuggable` - Production readiness flag
-- `RTMRs` - Runtime measurements
+- `TCB Status` - Platform security status (ITA: from JWT, DCAP: from TEE_TCB_SVN)
+- `Is Debuggable` - Production readiness flag (from TD attributes)
+- `RTMRs` - Runtime measurements (DCAP: parsed from quote body)
 
 ## Security Considerations
 
 ### Current Implementation (Research)
 
-This implementation performs **simple verification** suitable for research:
-- Checks JWT issuer string
-- Checks token expiry
-- Verifies nonce binding
+**ITA mode:**
+- Checks JWT issuer string and expiry
+- Verifies nonce binding in JWT claims
+- Does NOT verify JWT cryptographic signature (research only)
+
+**DCAP mode:**
+- Verifies ECDSA-P256 signature on raw TDX quote
+- Verifies nonce binding in quote report_data bytes
+- Does NOT fetch/verify Intel collateral (PCK cert chain, CRL)
 
 ### Production Enhancements Needed
 
 For production use, add:
-1. **Cryptographic JWT Signature Verification** - Verify against Intel's JWKS
-2. **MRTD Policy Enforcement** - Maintain list of trusted TD measurements
-3. **TCB Policy** - Reject outdated TCB status
-4. **Mutual Attestation** - Optional TDX → SGX verification
+1. **ITA: Cryptographic JWT Signature Verification** - Verify against Intel's JWKS
+2. **DCAP: Full Collateral Verification** - PCK cert chain, CRL, TCB info from Intel PCS
+3. **MRTD Policy Enforcement** - Maintain list of trusted TD measurements
+4. **TCB Policy** - Reject outdated TCB status
+5. **Mutual Attestation** - Optional TDX → SGX verification
 
 ## Configuration
 
 ### TDX Server Options
 
 ```
---port PORT      Server port (default: 8443)
---cert FILE      TLS certificate
---key FILE       TLS private key
---config FILE    Intel Trust Authority config
---test           Run self-test
+--port PORT          Server port (default: 8443)
+--method {ita,dcap}  Attestation method (default: ita)
+--cert FILE          TLS certificate
+--key FILE           TLS private key
+--config FILE        Intel Trust Authority config (ITA only)
+--test               Run self-test
 ```
 
 ### SGX Verifier Options
 
 ```
---tdx-host HOST  TDX server address (required)
---tdx-port PORT  TDX server port (default: 8443)
---ca-cert FILE   CA certificate for TLS
---no-verify      Skip TLS verification
---verbose        Enable debug output
---json           Output as JSON
+--tdx-host HOST      TDX server address (required)
+--tdx-port PORT      TDX server port (default: 8443)
+--method {ita,dcap}  Attestation method (default: ita)
+--ca-cert FILE       CA certificate for TLS
+--no-verify          Skip TLS verification
+--verbose            Enable debug output
+--json               Output as JSON
 ```
 
 ## Testing
@@ -219,8 +271,10 @@ make run-python TDX_HOST=<IP>
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `/dev/tdx_guest` not found | Not running on TDX VM | Deploy on TDX-enabled VM |
-| `trustauthority-cli` not found | Missing CLI tool | Install Intel Trust Authority CLI |
-| Token generation failed | API issues | Check `~/config.json` and API key |
+| `trustauthority-cli` not found | Missing CLI (ITA mode) | Install Intel Trust Authority CLI |
+| `libtdx_attest.so` not found | Missing DCAP library (DCAP mode) | Run `sudo bash install_dcap_packages.sh` |
+| Token generation failed | API issues (ITA mode) | Check `~/config.json` and API key |
+| `tdx_att_get_quote` failed | QE not running (DCAP mode) | Check QGS daemon: `systemctl status qgsd` |
 
 ### SGX Verifier Issues
 
@@ -229,6 +283,7 @@ make run-python TDX_HOST=<IP>
 | Connection refused | TDX server not running | Start TDX server |
 | TLS error | Certificate mismatch | Regenerate certificates |
 | Nonce verification failed | Binding issue | Check TDX server logs |
+| Signature verification failed | Quote corrupted or parsing mismatch | Run with `--verbose` to inspect quote bytes |
 
 ## License
 
