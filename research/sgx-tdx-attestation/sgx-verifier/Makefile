@@ -84,7 +84,7 @@ help:
 # ============================================================================
 
 # Step 1: Generate the manifest from template
-verifier.manifest: verifier.manifest.template sgx_tdx_verifier.py ../common/protocol.py
+verifier.manifest: verifier.manifest.template sgx_tdx_verifier.py sgx_controller.py ../common/protocol.py
 	@echo "[1/2] Generating manifest (this may take a few minutes)..."
 	@echo "      Gramine is hashing all trusted files..."
 	gramine-manifest \

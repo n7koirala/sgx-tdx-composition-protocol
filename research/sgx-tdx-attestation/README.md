@@ -36,26 +36,27 @@ Supports two attestation methods:
 
 ```
 sgx-tdx-attestation/
-├── README.md                     # This file
-├── docs/                         # Documentation
-│   ├── SETUP_GUIDE.md            # End-to-end setup instructions
-│   ├── ARCHITECTURE.md           # System design and trust model
-│   ├── PROTOCOL_SPEC.md          # Message formats and verification
-│   └── TROUBLESHOOTING.md        # Common issues and solutions
+├── README.md                       # This file
+├── docs/                           # Documentation
+│   ├── SETUP_GUIDE.md              # End-to-end setup instructions
+│   ├── ARCHITECTURE.md             # System design and trust model
+│   ├── PROTOCOL_SPEC.md            # Message formats and verification
+│   └── TROUBLESHOOTING.md          # Common issues and solutions
 ├── certs/
-│   ├── generate_certs.sh         # TLS certificate generation
-│   ├── ca.crt                    # CA certificate (generated)
-│   ├── server.crt                # TDX server certificate (generated)
-│   └── server.key                # TDX server private key (generated)
+│   ├── generate_certs.sh           # TLS certificate generation
+│   ├── ca.crt / server.crt / ...   # Generated certificates
 ├── common/
 │   ├── __init__.py
-│   └── protocol.py               # Shared protocol definitions
+│   └── protocol.py                 # Shared protocol (messages, DCAP verification)
 ├── tdx-server/
-│   └── tdx_attestation_server.py # TDX attestation server
-└── sgx-verifier/
-    ├── sgx_tdx_verifier.py       # SGX enclave verifier
-    ├── verifier.manifest.template
-    └── Makefile
+│   └── tdx_attestation_server.py   # TDX attestation server (ITA + DCAP)
+├── sgx-verifier/
+│   ├── sgx_tdx_verifier.py         # Single-shot SGX verifier
+│   ├── sgx_controller.py           # Multi-controller server (long-running)
+│   ├── verifier.manifest.template  # Gramine SGX manifest
+│   └── Makefile                    # Build + run targets
+└── end-user/
+    └── end_user_client.py           # End-user client (multi-controller failover)
 ```
 
 ## Documentation
@@ -108,39 +109,96 @@ sudo python3 tdx_attestation_server.py --port 8443 --method dcap --require-clien
 
 With `--require-client-cert`, only clients presenting a valid certificate signed by the CA can connect.
 
-### 3. Run SGX Verifier (on SGX Machine)
+### 3. Run SGX Verifier — Single-Shot (on SGX Machine)
 
-**ITA mode** (default):
+For a one-time verification of the TDX VM:
+
 ```bash
 cd sgx-verifier
+
+# ITA mode (default)
 python3 sgx_tdx_verifier.py --tdx-host <TDX_IP> --tdx-port 8443 --method ita --no-verify
-```
 
-**DCAP mode** (local ECDSA verification):
-```bash
-cd sgx-verifier
+# DCAP mode (local ECDSA verification)
 python3 sgx_tdx_verifier.py --tdx-host <TDX_IP> --tdx-port 8443 --method dcap --no-verify -v
 
-```bash
-# SGX enclave mode with DCAP
+# Via Gramine SGX enclave
 make run-sgx TDX_HOST=<TDX_IP> TDX_PORT=8443 METHOD=dcap
-# Direct mode (no SGX) with DCAP
-make run-direct TDX_HOST=<TDX_IP> TDX_PORT=8443 METHOD=dcap
-# Only Python with DCAP
-make run-python TDX_HOST=<TDX_IP> TDX_PORT=8443 METHOD=dcap
 ```
 
-**With mTLS authentication:**
+### 4. Run Multi-Controller Setup (Scalable, Fault-Tolerant)
+
+For production-like deployments with multiple independent SGX controllers:
+
+```bash
+# ── Terminal 1 (TDX VM): Start attestation server ──
+cd tdx-server
+sudo python3 tdx_attestation_server.py --port 8443 --method dcap
+
+# ── Terminal 2 (SGX Machine): Start controller #1 ──
+cd sgx-verifier
+make run-controller-python TDX_HOST=<TDX_IP> METHOD=dcap \
+    CONTROLLER_PORT=9001 CONTROLLER_ID=ctrl-1
+
+# ── Terminal 3 (SGX Machine): Start controller #2 ──
+cd sgx-verifier
+make run-controller-python TDX_HOST=<TDX_IP> METHOD=dcap \
+    CONTROLLER_PORT=9002 CONTROLLER_ID=ctrl-2
+
+# ── Terminal 4 (End-User): Verify via any controller ──
+cd end-user
+python3 end_user_client.py --controller-host <SGX_IP> --controller-port 9001 --no-verify
+
+# Or with automatic failover across multiple controllers:
+python3 end_user_client.py --controllers <SGX_IP>:9001,<SGX_IP>:9002 --no-verify
+```
+
+**With Gramine SGX enclave** (running the controller inside a real enclave):
 ```bash
 cd sgx-verifier
-python3 sgx_tdx_verifier.py \
-    --tdx-host <TDX_IP> \
-    --tdx-port 8443 \
-    --method dcap \
-    --ca-cert ../certs/ca.crt \
-    --client-cert ../certs/sgx_client.crt \
-    --client-key ../certs/sgx_client.key
+
+# Build and sign the manifest (measures sgx_controller.py into MRENCLAVE)
+make clean && make all
+
+# Start controller #1 inside SGX enclave
+make run-controller TDX_HOST=<TDX_IP> METHOD=dcap \
+    CONTROLLER_PORT=9001 CONTROLLER_ID=ctrl-1
+
+# Start controller #2 in a separate terminal
+make run-controller TDX_HOST=<TDX_IP> METHOD=dcap \
+    CONTROLLER_PORT=9002 CONTROLLER_ID=ctrl-2
 ```
+
+> **Note:** After modifying `sgx_controller.py` or `protocol.py`, run `make clean && make all`
+> to rebuild the manifest. Gramine hashes all trusted files into MRENCLAVE.
+
+## Multi-Controller Architecture
+
+The multi-controller setup enables **horizontal scalability** and **fault tolerance** by running N independent SGX enclave controllers, each periodically re-attesting the same TDX VM.
+
+```
+          ┌──────────┐  ┌──────────┐  ┌──────────┐
+          │ End User │  │ End User │  │ End User │
+          └────┬─────┘  └────┬─────┘  └────┬─────┘
+               │             │             │
+          ┌────▼─────┐  ┌────▼─────┐  ┌────▼─────┐
+          │ SGX      │  │ SGX      │  │ SGX      │   Port 9001, 9002, 9003
+          │ Ctrl #1  │  │ Ctrl #2  │  │ Ctrl #3  │   Each in own enclave
+          └────┬─────┘  └────┬─────┘  └────┬─────┘
+               │             │             │
+               └─────────────┼─────────────┘
+                             │   All independently verify same TDX VM
+                             ▼
+                       ┌───────────┐
+                       │  TDX VM   │   Port 8443
+                       └───────────┘
+```
+
+**Key properties:**
+- Each controller is fully independent (no coordination, no leader election)
+- Each controller caches the latest TDX verification result (configurable refresh interval)
+- End-user connects to any controller and receives a `ControllerToken` with cached TDX info
+- If one controller goes down, end-users failover to another
 
 ## Attestation Methods
 
@@ -232,7 +290,7 @@ For production use, add:
 --test               Run self-test
 ```
 
-### SGX Verifier Options
+### SGX Verifier Options (Single-Shot)
 
 ```
 --tdx-host HOST      TDX server address (required)
@@ -242,6 +300,32 @@ For production use, add:
 --no-verify          Skip TLS verification
 --verbose            Enable debug output
 --json               Output as JSON
+```
+
+### SGX Controller Options (Multi-Controller)
+
+```
+--controller-id ID          Unique controller name (default: ctrl-1)
+--port PORT                 End-user listener port (default: 9001)
+--tdx-host HOST             TDX server address (required)
+--tdx-port PORT             TDX server port (default: 8443)
+--method {ita,dcap}         Attestation method (default: dcap)
+--refresh-interval SECONDS  TDX re-attestation interval (default: 30)
+--cert FILE                 TLS certificate for controller
+--key FILE                  TLS private key for controller
+--no-verify-tdx             Skip TLS verification for TDX connection
+--verbose                   Enable verbose output
+```
+
+### End-User Client Options
+
+```
+--controller-host HOST      Single controller address
+--controller-port PORT      Controller port (default: 9001)
+--controllers LIST          Comma-separated list (host1:9001,host2:9002)
+--no-verify                 Skip TLS verification
+--json                      Output as JSON
+--verbose                   Enable verbose output
 ```
 
 ## Testing
@@ -261,7 +345,11 @@ make test-network TDX_HOST=<IP>
 ### Pure Python Mode (No SGX)
 
 ```bash
-make run-python TDX_HOST=<IP>
+# Single-shot verifier
+make run-python TDX_HOST=<IP> METHOD=dcap
+
+# Multi-controller
+make run-controller-python TDX_HOST=<IP> METHOD=dcap CONTROLLER_PORT=9001
 ```
 
 ## Troubleshooting
@@ -276,7 +364,7 @@ make run-python TDX_HOST=<IP>
 | Token generation failed | API issues (ITA mode) | Check `~/config.json` and API key |
 | `tdx_att_get_quote` failed | QE not running (DCAP mode) | Check QGS daemon: `systemctl status qgsd` |
 
-### SGX Verifier Issues
+### SGX Verifier / Controller Issues
 
 | Error | Cause | Solution |
 |-------|-------|----------|
@@ -284,6 +372,9 @@ make run-python TDX_HOST=<IP>
 | TLS error | Certificate mismatch | Regenerate certificates |
 | Nonce verification failed | Binding issue | Check TDX server logs |
 | Signature verification failed | Quote corrupted or parsing mismatch | Run with `--verbose` to inspect quote bytes |
+| `ImportError: verify_dcap_quote` | Outdated `protocol.py` on SGX machine | Sync updated `protocol.py` from TDX VM |
+| Controller shows "PENDING" | Background verification hasn't completed | Wait for first refresh cycle |
+| End-user connection refused | Controller not running on that port | Check controller port and firewall |
 
 ## License
 
