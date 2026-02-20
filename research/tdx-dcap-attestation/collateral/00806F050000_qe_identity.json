@@ -1,0 +1,87 @@
+{
+  "enclaveIdentity": {
+    "id": "QE",
+    "version": 2,
+    "issueDate": "2026-02-20T00:36:19Z",
+    "nextUpdate": "2026-03-22T00:36:19Z",
+    "tcbEvaluationDataNumber": 18,
+    "miscselect": "00000000",
+    "miscselectMask": "FFFFFFFF",
+    "attributes": "11000000000000000000000000000000",
+    "attributesMask": "FBFFFFFFFFFFFFFF0000000000000000",
+    "mrsigner": "8C4F5775D796503E96137F77C68A829A0056AC8DED70140B081B094490C57BFF",
+    "isvprodid": 1,
+    "tcbLevels": [
+      {
+        "tcb": {
+          "isvsvn": 8
+        },
+        "tcbDate": "2024-11-13T00:00:00Z",
+        "tcbStatus": "UpToDate"
+      },
+      {
+        "tcb": {
+          "isvsvn": 6
+        },
+        "tcbDate": "2021-11-10T00:00:00Z",
+        "tcbStatus": "OutOfDate",
+        "advisoryIDs": [
+          "INTEL-SA-00615"
+        ]
+      },
+      {
+        "tcb": {
+          "isvsvn": 5
+        },
+        "tcbDate": "2020-11-11T00:00:00Z",
+        "tcbStatus": "OutOfDate",
+        "advisoryIDs": [
+          "INTEL-SA-00477",
+          "INTEL-SA-00615"
+        ]
+      },
+      {
+        "tcb": {
+          "isvsvn": 4
+        },
+        "tcbDate": "2019-11-13T00:00:00Z",
+        "tcbStatus": "OutOfDate",
+        "advisoryIDs": [
+          "INTEL-SA-00334",
+          "INTEL-SA-00477",
+          "INTEL-SA-00615"
+        ]
+      },
+      {
+        "tcb": {
+          "isvsvn": 2
+        },
+        "tcbDate": "2019-05-15T00:00:00Z",
+        "tcbStatus": "OutOfDate",
+        "advisoryIDs": [
+          "INTEL-SA-00219",
+          "INTEL-SA-00293",
+          "INTEL-SA-00334",
+          "INTEL-SA-00477",
+          "INTEL-SA-00615"
+        ]
+      },
+      {
+        "tcb": {
+          "isvsvn": 1
+        },
+        "tcbDate": "2018-08-15T00:00:00Z",
+        "tcbStatus": "OutOfDate",
+        "advisoryIDs": [
+          "INTEL-SA-00202",
+          "INTEL-SA-00219",
+          "INTEL-SA-00293",
+          "INTEL-SA-00334",
+          "INTEL-SA-00477",
+          "INTEL-SA-00615"
+        ]
+      }
+    ]
+  },
+  "signature": "76c9501a99ba49f9b77322ec4f22f03168899ad1cb25c735827a3c484be5711e78b5040ff803fc3db4ea7071bd15c976ceb7e9d3867010644da7e5e098eacda1"
+}
