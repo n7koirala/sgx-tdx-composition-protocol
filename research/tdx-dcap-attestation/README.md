@@ -2,15 +2,6 @@
 
 Pure DCAP-based TDX attestation — generates and verifies TDX quotes **locally** without Intel Trust Authority (ITA).
 
-## Why DCAP Instead of ITA?
-
-| Aspect | Intel Trust Authority (ITA) | Pure DCAP (This) |
-|--------|---------------------------|-------------------|
-| **Per-quote Intel call** | ✅ Yes (cloud API) | ❌ No (local) |
-| **Internet required** | Every attestation | One-time collateral fetch |
-| **Scalability** | Rate-limited by Intel API | Unlimited local verification |
-| **Latency** | ~400ms (network RTT) | ~10ms (local crypto) |
-| **Trust** | Trust Intel's JWT verdict | Verify the raw quote yourself |
 
 ## Architecture
 
