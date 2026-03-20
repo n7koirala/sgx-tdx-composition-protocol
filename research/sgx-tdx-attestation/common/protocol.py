@@ -747,17 +747,24 @@ def verify_ima_log(ima_log_text: str, claimed_pcr10: str,
     """
     Verify IMA event log integrity by replaying entries against vTPM PCR 10.
     
-    The IMA event log format (ima-ng template):
-        PCR  TEMPLATE_HASH  TEMPLATE_NAME  FILE_HASH  FILE_PATH
-        10   f7de28a...     ima-ng         sha256:3b...  /usr/lib/systemd/systemd
+    The IMA ASCII event log format (ima-ng template):
+        PCR  TEMPLATE_HASH  TEMPLATE_NAME  ALGO:FILE_HASH  FILE_PATH
+        10   f7de28a...     ima-ng         sha256:3b89...   /usr/lib/systemd/systemd
     
-    Each TEMPLATE_HASH is the SHA-1 of the template data (hash:filename).
-    PCR 10 is extended with each TEMPLATE_HASH:
-        PCR10 = SHA256(PCR10 || SHA1_TEMPLATE_HASH_BYTES)
+    The TEMPLATE_HASH in column 2 is always SHA-1 (used for the SHA-1 PCR bank).
+    For the SHA-256 PCR bank, the kernel computes SHA-256 of the binary template
+    data, which we must reconstruct from the ASCII fields.
     
-    Note: IMA uses SHA-1 for template hashes internally but the PCR bank
-    may use SHA-256. The extend operation is:
-        PCR10_new = SHA256(PCR10_old || SHA1_hash_padded_to_32_bytes)
+    ima-ng template binary format (TLV encoded):
+        [4-byte LE length of d-ng][d-ng data][4-byte LE length of n-ng][n-ng data]
+    
+    Where:
+        d-ng data = "algo:" + "\\0" + binary_digest_bytes
+        n-ng data = filename + "\\0"
+    
+    PCR extend for SHA-256 bank:
+        sha256_template_hash = SHA256(template_binary_data)
+        PCR10_new = SHA256(PCR10_old || sha256_template_hash)
     
     Args:
         ima_log_text: Raw IMA event log text (one entry per line)
@@ -787,38 +794,62 @@ def verify_ima_log(ima_log_text: str, claimed_pcr10: str,
         if not line:
             continue
         
-        parts = line.split(None, 4)  # Split into at most 5 parts
-        if len(parts) < 2:
-            if debug:
+        # Parse: PCR TEMPLATE_HASH TEMPLATE_NAME ALGO:DIGEST FILENAME
+        parts = line.split(None, 4)
+        if len(parts) < 4:
+            if debug and i < 5:
                 print(f"[IMA] Skipping malformed line {i+1}: {line[:80]}")
             continue
         
-        # parts[0] = PCR index (should be "10")
-        # parts[1] = template hash (SHA-1 hex, 40 chars)
         pcr_idx = parts[0]
-        template_hash_hex = parts[1]
+        # parts[1] = SHA-1 template hash (NOT used for SHA-256 PCR bank)
+        template_name = parts[2]
+        algo_digest = parts[3]  # e.g., "sha256:3b8966..."
+        filename = parts[4] if len(parts) > 4 else ""
         
         if pcr_idx != "10":
-            if debug:
-                print(f"[IMA] Skipping non-PCR10 entry at line {i+1}: PCR={pcr_idx}")
             continue
         
         try:
-            # Template hash is SHA-1 (20 bytes)
-            template_hash_bytes = bytes.fromhex(template_hash_hex)
-            
-            # For SHA-256 PCR bank, SHA-1 hash is zero-padded to 32 bytes
-            if len(template_hash_bytes) == 20:
-                template_hash_padded = template_hash_bytes + b'\x00' * 12
-            elif len(template_hash_bytes) == 32:
-                template_hash_padded = template_hash_bytes
+            if template_name == "ima-ng":
+                # Parse algo:hex_digest
+                if ':' not in algo_digest:
+                    if debug:
+                        print(f"[IMA] Missing algo prefix at line {i+1}")
+                    continue
+                
+                algo, hex_digest = algo_digest.split(':', 1)
+                digest_bytes = bytes.fromhex(hex_digest)
+                
+                # Reconstruct binary template data (TLV format)
+                # d-ng field: "algo:" + "\0" + binary_digest
+                d_ng_data = (algo + ":").encode('utf-8') + b'\x00' + digest_bytes
+                d_ng_len = struct.pack('<I', len(d_ng_data))
+                
+                # n-ng field: filename + "\0"
+                n_ng_data = filename.encode('utf-8') + b'\x00'
+                n_ng_len = struct.pack('<I', len(n_ng_data))
+                
+                # Full template data
+                template_data = d_ng_len + d_ng_data + n_ng_len + n_ng_data
+                
+                # Compute SHA-256 of template data (for SHA-256 PCR bank)
+                sha256_template_hash = hashlib.sha256(template_data).digest()
+                
+            elif template_name == "ima":
+                # Legacy IMA template: use SHA-1 hash padded to 32 bytes
+                template_hash_bytes = bytes.fromhex(parts[1])
+                sha256_template_hash = template_hash_bytes.ljust(32, b'\x00')
+                
             else:
-                if debug:
-                    print(f"[IMA] Unexpected hash length {len(template_hash_bytes)} at line {i+1}")
-                template_hash_padded = template_hash_bytes.ljust(32, b'\x00')
+                if debug and i < 5:
+                    print(f"[IMA] Unknown template '{template_name}' at line {i+1}")
+                # Fall back to SHA-1 template hash from column 2
+                template_hash_bytes = bytes.fromhex(parts[1])
+                sha256_template_hash = template_hash_bytes.ljust(32, b'\x00')
             
-            # Extend: PCR10 = SHA256(PCR10 || template_hash_padded)
-            pcr10 = hashlib.sha256(pcr10 + template_hash_padded).digest()
+            # Extend: PCR10 = SHA256(PCR10 || sha256_template_hash)
+            pcr10 = hashlib.sha256(pcr10 + sha256_template_hash).digest()
             entry_count += 1
             
         except (ValueError, Exception) as e:
