@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.protocol import (
     AttestationRequest, AttestationResponse, VerificationResult,
     generate_nonce, verify_nonce_binding, verify_jwt_simple, decode_jwt_payload,
-    verify_dcap_quote,
+    verify_dcap_quote, verify_ima_log,
     create_tls_context_client, send_message, receive_message,
     DEFAULT_PORT, PROTOCOL_VERSION, ProtocolError,
     METHOD_ITA, METHOD_DCAP, VALID_METHODS
@@ -142,6 +142,33 @@ class SGXTDXVerifier:
                     self.log(f"Received ITA token ({len(response.token)} bytes)")
                     result = self._verify_token(response.token, nonce)
                     result.mrtd = response.mrtd
+                
+                # Step 6: Verify IMA event log (Layer 2 - runtime integrity)
+                if response.ima_log and response.pcr10:
+                    self.log(f"Verifying IMA event log ({response.ima_entry_count} entries)...")
+                    try:
+                        ima_log_text = base64.b64decode(response.ima_log).decode('utf-8')
+                        ima_valid, ima_count, ima_msg = verify_ima_log(
+                            ima_log_text, response.pcr10, debug=self.verbose
+                        )
+                        result.ima_verified = ima_valid
+                        result.ima_entry_count = ima_count
+                        
+                        if ima_valid:
+                            result.runtime_verdict = "CLEAN"
+                            self.log(f"✓ IMA verification passed: {ima_msg}")
+                        else:
+                            result.runtime_verdict = "RUNTIME_VIOLATION"
+                            result.warnings.append(f"IMA verification failed: {ima_msg}")
+                            self.log(f"✗ IMA verification failed: {ima_msg}")
+                    except Exception as e:
+                        result.runtime_verdict = "IMA_ERROR"
+                        result.warnings.append(f"IMA verification error: {e}")
+                        self.log(f"✗ IMA verification error: {e}")
+                else:
+                    result.runtime_verdict = "IMA_UNAVAILABLE"
+                    if self.verbose:
+                        self.log("IMA data not included in response")
                 
             finally:
                 tls_sock.close()
@@ -289,48 +316,56 @@ def print_banner():
 
 def print_result(result: VerificationResult):
     """Print verification result"""
-    print("\n" + "=" * 70)
-    print("VERIFICATION RESULT")
-    print("=" * 70)
+    print()
+    print("=" * 60)
+    print("ATTESTATION RESULT")
+    print("=" * 60)
     
-    # Verdict with color indication
+    # Boot integrity (Layer 1)
     if result.verdict == "TRUSTED":
-        print(f"\n  ✓ Verdict: {result.verdict}")
-    elif result.verdict == "UNTRUSTED":
-        print(f"\n  ✗ Verdict: {result.verdict}")
+        print(f"  Boot Verdict:     ✓ {result.verdict}")
     else:
-        print(f"\n  ? Verdict: {result.verdict}")
+        print(f"  Boot Verdict:     ✗ {result.verdict}")
     
-    if result.error:
-        print(f"  Error: {result.error}")
+    # Runtime integrity (Layer 2)
+    if result.runtime_verdict == "CLEAN":
+        print(f"  Runtime Verdict:  ✓ {result.runtime_verdict} ({result.ima_entry_count} IMA entries verified)")
+    elif result.runtime_verdict == "RUNTIME_VIOLATION":
+        print(f"  Runtime Verdict:  ✗ {result.runtime_verdict}")
+    elif result.runtime_verdict == "IMA_UNAVAILABLE":
+        print(f"  Runtime Verdict:  ⚠ {result.runtime_verdict} (IMA data not in response)")
+    elif result.runtime_verdict:
+        print(f"  Runtime Verdict:  ⚠ {result.runtime_verdict}")
     
-    print(f"\n  Time: {result.verification_time_ms:.1f} ms")
+    print(f"  Method:           {result.attestation_method}")
+    print(f"  MRTD:             {result.mrtd[:32]}..." if result.mrtd else "  MRTD:             N/A")
     
-    # Show attestation method
-    method_label = "ITA (Intel Trust Authority)" if result.attestation_method == METHOD_ITA else "DCAP (Local Verification)"
-    print(f"\n  Method: {method_label}")
+    print()
+    print("  Verification Checks:")
+    checks = [
+        ("Nonce binding", result.nonce_verified),
+        ("Issuer", result.issuer_verified),
+        ("Expiry", result.expiry_verified),
+        ("Signature", result.signature_verified),
+        ("IMA log replay", result.ima_verified),
+    ]
+    for name, passed in checks:
+        icon = "✓" if passed else "✗"
+        print(f"    {icon} {name}")
     
-    print("\n  Checks:")
-    if result.attestation_method == METHOD_DCAP:
-        print(f"    Signature: {'✓' if result.signature_verified else '✗'} (ECDSA-P256)")
-        print(f"    Nonce:     {'✓' if result.nonce_verified else '✗'}")
-    else:
-        print(f"    Issuer:  {'✓' if result.issuer_verified else '✗'}")
-        print(f"    Expiry:  {'✓' if result.expiry_verified else '✗'}")
-        print(f"    Nonce:   {'✓' if result.nonce_verified else '✗'}")
-    
-    if result.mrtd:
-        print(f"\n  TDX Measurements:")
-        print(f"    MRTD:       {result.mrtd[:48]}...")
-        print(f"    TCB Status: {result.tcb_status}")
-        print(f"    Debuggable: {result.is_debuggable}")
+    if result.tcb_status:
+        print(f"\n  TCB Status: {result.tcb_status}")
     
     if result.warnings:
-        print("\n  Warnings:")
-        for warning in result.warnings:
-            print(f"    ⚠ {warning}")
+        print(f"\n  Warnings:")
+        for w in result.warnings:
+            print(f"    ⚠ {w}")
     
-    print("\n" + "=" * 70)
+    if result.error:
+        print(f"\n  Error: {result.error}")
+    
+    print(f"\n  Verification Time: {result.verification_time_ms:.1f}ms")
+    print("=" * 60)
 
 
 def main():

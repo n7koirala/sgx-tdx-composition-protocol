@@ -98,6 +98,10 @@ class AttestationResponse:
     Contains either:
     - ITA mode: JWT token from Intel Trust Authority
     - DCAP mode: Raw TDX quote (base64-encoded) for local verification
+    
+    Optionally includes runtime integrity data:
+    - IMA event log (base64-encoded) for runtime measurement verification
+    - vTPM PCR 10 value for IMA log replay verification
     """
     status: str = "success"  # "success" or "error"
     token: str = ""          # JWT token from Intel Trust Authority (ITA mode)
@@ -106,6 +110,9 @@ class AttestationResponse:
     error: str = ""          # Error message if status is "error"
     attestation_method: str = METHOD_ITA  # Which method was used
     raw_quote: str = ""      # Base64-encoded raw TDX quote (DCAP mode)
+    ima_log: str = ""        # Base64-encoded IMA event log (runtime integrity)
+    pcr10: str = ""          # vTPM PCR 10 hex value (IMA aggregate)
+    ima_entry_count: int = 0 # Number of IMA event log entries
     protocol_version: str = PROTOCOL_VERSION
     timestamp: float = field(default_factory=time.time)
     
@@ -118,6 +125,9 @@ class AttestationResponse:
             "error": self.error,
             "attestation_method": self.attestation_method,
             "raw_quote": self.raw_quote,
+            "ima_log": self.ima_log,
+            "pcr10": self.pcr10,
+            "ima_entry_count": self.ima_entry_count,
             "protocol_version": self.protocol_version,
             "timestamp": self.timestamp
         })
@@ -133,6 +143,9 @@ class AttestationResponse:
             error=d.get("error", ""),
             attestation_method=d.get("attestation_method", METHOD_ITA),
             raw_quote=d.get("raw_quote", ""),
+            ima_log=d.get("ima_log", ""),
+            pcr10=d.get("pcr10", ""),
+            ima_entry_count=d.get("ima_entry_count", 0),
             protocol_version=d.get("protocol_version", PROTOCOL_VERSION),
             timestamp=d.get("timestamp", time.time())
         )
@@ -147,6 +160,9 @@ class AttestationResponse:
 class VerificationResult:
     """
     Result of TDX attestation verification by SGX Enclave.
+    
+    Includes both boot-time integrity (TDX quote) and runtime integrity
+    (IMA event log verification) results.
     """
     verified: bool = False
     verdict: str = ""  # "TRUSTED", "UNTRUSTED", "ERROR"
@@ -158,6 +174,10 @@ class VerificationResult:
     expiry_verified: bool = False
     signature_verified: bool = False  # DCAP: ECDSA signature check
     attestation_method: str = ""     # Which method was used
+    # Runtime integrity (IMA)
+    ima_verified: bool = False       # IMA log replay matched PCR 10
+    ima_entry_count: int = 0         # Number of IMA entries verified
+    runtime_verdict: str = ""        # "CLEAN", "RUNTIME_VIOLATION", "IMA_UNAVAILABLE"
     warnings: list = field(default_factory=list)
     error: str = ""
     verification_time_ms: float = 0.0
@@ -175,6 +195,12 @@ class VerificationResult:
                 "issuer": self.issuer_verified,
                 "expiry": self.expiry_verified,
                 "signature": self.signature_verified,
+                "ima": self.ima_verified,
+            },
+            "runtime": {
+                "verdict": self.runtime_verdict,
+                "ima_verified": self.ima_verified,
+                "ima_entry_count": self.ima_entry_count,
             },
             "warnings": self.warnings,
             "error": self.error,
@@ -420,7 +446,7 @@ def receive_message(sock, timeout: float = 30.0) -> str:
         if not chunk:
             break
         buffer += chunk
-        if len(buffer) > 100000:  # 100KB max
+        if len(buffer) > 10_000_000:  # 10MB max (IMA logs can be large)
             raise ProtocolError("Message too large")
     
     if MESSAGE_DELIMITER in buffer:
@@ -712,6 +738,112 @@ def verify_dcap_quote(quote_bytes: bytes, expected_nonce: str = None,
     
     result.verification_time_ms = (time.time() - start) * 1000
     return result
+
+
+# ─── IMA Event Log Verification ──────────────────────────────────────────────
+
+def verify_ima_log(ima_log_text: str, claimed_pcr10: str,
+                   debug: bool = False) -> Tuple[bool, int, str]:
+    """
+    Verify IMA event log integrity by replaying entries against vTPM PCR 10.
+    
+    The IMA event log format (ima-ng template):
+        PCR  TEMPLATE_HASH  TEMPLATE_NAME  FILE_HASH  FILE_PATH
+        10   f7de28a...     ima-ng         sha256:3b...  /usr/lib/systemd/systemd
+    
+    Each TEMPLATE_HASH is the SHA-1 of the template data (hash:filename).
+    PCR 10 is extended with each TEMPLATE_HASH:
+        PCR10 = SHA256(PCR10 || SHA1_TEMPLATE_HASH_BYTES)
+    
+    Note: IMA uses SHA-1 for template hashes internally but the PCR bank
+    may use SHA-256. The extend operation is:
+        PCR10_new = SHA256(PCR10_old || SHA1_hash_padded_to_32_bytes)
+    
+    Args:
+        ima_log_text: Raw IMA event log text (one entry per line)
+        claimed_pcr10: Hex string of claimed vTPM PCR 10 value
+        debug: Enable debug output
+    
+    Returns:
+        Tuple of (is_valid, entry_count, error_or_message)
+    """
+    if not ima_log_text or not ima_log_text.strip():
+        return False, 0, "Empty IMA event log"
+    
+    if not claimed_pcr10 or not claimed_pcr10.strip():
+        return False, 0, "No PCR 10 value provided"
+    
+    # Normalize claimed PCR 10 to lowercase hex
+    claimed_pcr10 = claimed_pcr10.strip().lower()
+    
+    # Initialize PCR 10 to all zeros (32 bytes for SHA-256 bank)
+    pcr10 = b'\x00' * 32
+    
+    lines = ima_log_text.strip().split('\n')
+    entry_count = 0
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        
+        parts = line.split(None, 4)  # Split into at most 5 parts
+        if len(parts) < 2:
+            if debug:
+                print(f"[IMA] Skipping malformed line {i+1}: {line[:80]}")
+            continue
+        
+        # parts[0] = PCR index (should be "10")
+        # parts[1] = template hash (SHA-1 hex, 40 chars)
+        pcr_idx = parts[0]
+        template_hash_hex = parts[1]
+        
+        if pcr_idx != "10":
+            if debug:
+                print(f"[IMA] Skipping non-PCR10 entry at line {i+1}: PCR={pcr_idx}")
+            continue
+        
+        try:
+            # Template hash is SHA-1 (20 bytes)
+            template_hash_bytes = bytes.fromhex(template_hash_hex)
+            
+            # For SHA-256 PCR bank, SHA-1 hash is zero-padded to 32 bytes
+            if len(template_hash_bytes) == 20:
+                template_hash_padded = template_hash_bytes + b'\x00' * 12
+            elif len(template_hash_bytes) == 32:
+                template_hash_padded = template_hash_bytes
+            else:
+                if debug:
+                    print(f"[IMA] Unexpected hash length {len(template_hash_bytes)} at line {i+1}")
+                template_hash_padded = template_hash_bytes.ljust(32, b'\x00')
+            
+            # Extend: PCR10 = SHA256(PCR10 || template_hash_padded)
+            pcr10 = hashlib.sha256(pcr10 + template_hash_padded).digest()
+            entry_count += 1
+            
+        except (ValueError, Exception) as e:
+            if debug:
+                print(f"[IMA] Error processing line {i+1}: {e}")
+            continue
+    
+    if entry_count == 0:
+        return False, 0, "No valid IMA entries found"
+    
+    # Compare computed PCR 10 with claimed value
+    computed_pcr10 = pcr10.hex()
+    
+    if debug:
+        print(f"[IMA] Replayed {entry_count} entries")
+        print(f"[IMA] Computed PCR10: {computed_pcr10}")
+        print(f"[IMA] Claimed  PCR10: {claimed_pcr10}")
+    
+    if computed_pcr10 == claimed_pcr10:
+        return True, entry_count, f"IMA log integrity verified ({entry_count} entries)"
+    else:
+        return False, entry_count, (
+            f"PCR 10 mismatch after {entry_count} entries: "
+            f"computed={computed_pcr10[:16]}... claimed={claimed_pcr10[:16]}..."
+        )
 
 
 # ─── Multi-Controller Protocol ───────────────────────────────────────────────

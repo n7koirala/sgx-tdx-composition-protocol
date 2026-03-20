@@ -61,7 +61,7 @@ class TDXAttestationServer:
     
     def __init__(self, port: int, cert_file: str, key_file: str, config_path: str,
                  ca_cert_file: str = None, require_client_cert: bool = False,
-                 method: str = METHOD_ITA):
+                 method: str = METHOD_ITA, enable_ima: bool = True):
         self.port = port
         self.cert_file = cert_file
         self.key_file = key_file
@@ -69,10 +69,15 @@ class TDXAttestationServer:
         self.ca_cert_file = ca_cert_file
         self.require_client_cert = require_client_cert
         self.method = method
+        self.enable_ima = enable_ima
         self.running = False
         
         # libtdx_attest library handle (for DCAP mode)
         self._tdx_lib = None
+        
+        # IMA paths
+        self.IMA_LOG_PATH = "/sys/kernel/security/ima/ascii_runtime_measurements"
+        self.PCR10_PATH = "/sys/class/tpm/tpm0/pcr-sha256/10"
         
         # Statistics
         self.stats = {
@@ -262,12 +267,55 @@ class TDXAttestationServer:
             pass
         return ''
     
+    def read_ima_log(self) -> tuple:
+        """
+        Read the IMA event log from the kernel.
+        
+        Returns:
+            Tuple of (log_text, entry_count) or ("", 0) if unavailable
+        """
+        try:
+            with open(self.IMA_LOG_PATH, 'r') as f:
+                log_text = f.read()
+            entry_count = len([l for l in log_text.strip().split('\n') if l.strip()])
+            return log_text, entry_count
+        except FileNotFoundError:
+            return "", 0
+        except PermissionError:
+            print("    [IMA] Permission denied reading IMA log (need root)")
+            return "", 0
+        except Exception as e:
+            print(f"    [IMA] Error reading IMA log: {e}")
+            return "", 0
+    
+    def read_pcr10(self) -> str:
+        """
+        Read vTPM PCR 10 value.
+        
+        Returns:
+            Hex string of PCR 10 value, or "" if unavailable
+        """
+        try:
+            with open(self.PCR10_PATH, 'r') as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return ""
+        except PermissionError:
+            print("    [IMA] Permission denied reading PCR 10 (need root)")
+            return ""
+        except Exception as e:
+            print(f"    [IMA] Error reading PCR 10: {e}")
+            return ""
+    
     def handle_request(self, request_json: str) -> str:
         """
         Handle an attestation request.
         
         Routes to ITA or DCAP based on the server's configured method,
         or the request's attestation_method field.
+        
+        Also includes IMA event log and vTPM PCR 10 for runtime integrity
+        verification (Layer 2 attestation) when --enable-ima is set.
         
         Args:
             request_json: JSON string of AttestationRequest
@@ -309,6 +357,21 @@ class TDXAttestationServer:
                     mrtd=mrtd,
                     attestation_method=METHOD_ITA,
                 )
+            
+            # Layer 2: Collect IMA runtime integrity data
+            if self.enable_ima:
+                ima_log_text, entry_count = self.read_ima_log()
+                pcr10_value = self.read_pcr10()
+                
+                if ima_log_text:
+                    response.ima_log = base64.b64encode(
+                        ima_log_text.encode('utf-8')
+                    ).decode('ascii')
+                    response.ima_entry_count = entry_count
+                    response.pcr10 = pcr10_value
+                    print(f"    [IMA] Included {entry_count} IMA entries, PCR10={pcr10_value[:16]}...")
+                else:
+                    print(f"    [IMA] IMA log not available")
             
             self.stats["successful"] += 1
             return response.to_json()
@@ -415,6 +478,14 @@ class TDXAttestationServer:
             print(f"CA Certificate:   {self.ca_cert_file}")
         if self.method == METHOD_ITA:
             print(f"Config:           {self.config_path}")
+        # IMA status
+        ima_status = "Disabled"
+        if self.enable_ima:
+            if os.path.exists(self.IMA_LOG_PATH):
+                ima_status = "Enabled (IMA log available)"
+            else:
+                ima_status = "Enabled (IMA log NOT found — measurements will be empty)"
+        print(f"IMA Runtime:      {ima_status}")
         print(f"Started:          {self.stats['start_time']}")
         print("=" * 70)
         if self.require_client_cert:
@@ -538,6 +609,9 @@ def main():
                         help=f"Attestation method: {METHOD_ITA} (cloud) or {METHOD_DCAP} (local). Default: {METHOD_ITA}")
     parser.add_argument("--test", action="store_true",
                        help="Run self-test mode")
+    parser.add_argument("--enable-ima", type=lambda x: x.lower() != 'false',
+                       default=True, metavar="BOOL",
+                       help="Include IMA event log in responses (default: true)")
     
     args = parser.parse_args()
     
@@ -558,7 +632,8 @@ def main():
             config_path=args.config,
             ca_cert_file=ca_cert_file if args.require_client_cert else None,
             require_client_cert=args.require_client_cert,
-            method=args.method
+            method=args.method,
+            enable_ima=args.enable_ima
         )
         server.run()
     except KeyboardInterrupt:

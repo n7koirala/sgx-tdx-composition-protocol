@@ -31,6 +31,8 @@ import hashlib
 import statistics
 import argparse
 import threading
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -228,6 +230,9 @@ def check_available_methods() -> Dict[str, bool]:
     except ImportError:
         methods["libsgx_dcap_quoteverify"] = False
 
+    # Method 5: ITA (Intel Trust Authority via trustauthority-cli)
+    methods["ita (trustauthority-cli)"] = shutil.which("trustauthority-cli") is not None
+
     return methods
 
 
@@ -263,6 +268,38 @@ def single_verification_python(quote_bytes: bytes, collateral, report_data: byte
     result = verify_quote(quote_bytes, collateral, report_data)
     elapsed = (time.perf_counter() - start) * 1000
     return elapsed, result.verdict
+
+
+def single_attestation_ita(config_path: str) -> Tuple[float, int]:
+    """
+    Single attestation using Intel Trust Authority (trustauthority-cli).
+    Returns (time_ms, token_size_bytes).
+
+    This calls `trustauthority-cli token --tdx` which:
+      1. Generates a TDX quote locally
+      2. Sends it to Intel Trust Authority cloud
+      3. Returns a signed JWT token
+
+    The returned time includes all three phases (local + network + cloud).
+    """
+    start = time.perf_counter()
+    result = subprocess.run(
+        ["sudo", "trustauthority-cli", "token", "--tdx", "-c", config_path],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    elapsed = (time.perf_counter() - start) * 1000
+
+    # JWT tokens start with "eyJ" (base64 of '{"')
+    if "eyJ" in result.stdout:
+        # Extract the token (last non-empty line)
+        lines = result.stdout.strip().split('\n')
+        token = lines[-1].strip()
+        return elapsed, len(token)
+    else:
+        error_msg = result.stderr.strip()[:200] if result.stderr else "Unknown error"
+        raise RuntimeError(f"ITA attestation failed: {error_msg}")
 
 
 # ─── Scalability Benchmark ────────────────────────────────────────────────────
@@ -338,15 +375,19 @@ class BenchmarkResult:
 def run_benchmark(method: str,
                   count: int,
                   threads: int = 1,
-                  verbose: bool = False) -> BenchmarkResult:
+                  verbose: bool = False,
+                  ita_config: str = None,
+                  ita_delay: float = 0.5) -> BenchmarkResult:
     """
     Run a scalability benchmark for a given attestation method.
 
     Args:
-        method: "configfs", "libtdx_attest", "ioctl", "verify_python"
+        method: "configfs", "libtdx_attest", "ioctl", "verify_python", "ita"
         count: Number of attestations to perform
         threads: Number of concurrent threads
         verbose: Print progress
+        ita_config: Path to ITA config file (for method="ita")
+        ita_delay: Seconds to sleep between ITA requests (rate limiting)
 
     Returns:
         BenchmarkResult with timing statistics
@@ -404,6 +445,8 @@ def run_benchmark(method: str,
                 t, _ = single_attestation_ioctl(rd)
             elif method == "verify_python":
                 t, _ = single_verification_python(sample_quote, collateral, None)
+            elif method == "ita":
+                t, _ = single_attestation_ita(ita_config)
             else:
                 raise ValueError(f"Unknown method: {method}")
 
@@ -430,6 +473,10 @@ def run_benchmark(method: str,
             if verbose and (i + 1) % max(1, count // 10) == 0:
                 print(f"  Progress: {i + 1}/{count} "
                       f"(avg: {result.mean_ms:.1f}ms)")
+
+            # Rate-limit ITA requests to avoid API throttling
+            if method == "ita" and ita_delay > 0 and i < count - 1:
+                time.sleep(ita_delay)
     else:
         # Concurrent execution
         with ThreadPoolExecutor(max_workers=threads) as executor:
@@ -499,7 +546,12 @@ def main():
     parser.add_argument("--threads", "-t", type=int, default=1,
                         help="Number of concurrent threads (default: 1)")
     parser.add_argument("--methods", type=str, default="all",
-                        help="Comma-separated methods: configfs,libtdx_attest,ioctl,verify_python,all")
+                        help="Comma-separated methods: configfs,libtdx_attest,ioctl,verify_python,ita,all")
+    parser.add_argument("--ita-config", type=str,
+                        default=os.path.expanduser("~/config.json"),
+                        help="Path to Intel Trust Authority config file (default: ~/config.json)")
+    parser.add_argument("--ita-delay", type=float, default=0.5,
+                        help="Seconds to sleep between ITA requests to avoid throttling (default: 0.5)")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.add_argument("--json", action="store_true",
                         help="Output results as JSON")
@@ -582,6 +634,8 @@ def main():
             # Always include verification benchmark if we can generate quotes
             if available.get("configfs-tsm") or available.get("libtdx_attest"):
                 methods_to_test.append("verify_python")
+            if available.get("ita (trustauthority-cli)"):
+                methods_to_test.append("ita")
         else:
             methods_to_test = [m.strip() for m in args.methods.split(",")]
 
@@ -602,11 +656,18 @@ def main():
             print(f"  Benchmarking: {method} ({args.count} attestations, {args.threads} threads)")
             print(f"{'─' * 60}")
 
+            # ITA must run single-threaded (subprocess + rate limiting)
+            method_threads = 1 if method == "ita" else args.threads
+            if method == "ita" and args.threads > 1:
+                print(f"  (ITA forced to 1 thread — subprocess-based, rate-limited)")
+
             bench = run_benchmark(
                 method=method,
                 count=args.count,
-                threads=args.threads,
+                threads=method_threads,
                 verbose=args.verbose,
+                ita_config=args.ita_config,
+                ita_delay=args.ita_delay,
             )
             results.append(bench)
             print_benchmark_result(bench)
