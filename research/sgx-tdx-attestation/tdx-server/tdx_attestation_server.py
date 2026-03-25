@@ -77,7 +77,12 @@ class TDXAttestationServer:
         
         # IMA paths
         self.IMA_LOG_PATH = "/sys/kernel/security/ima/ascii_runtime_measurements"
+        self.IMA_COUNT_PATH = "/sys/kernel/security/ima/runtime_measurements_count"
         self.PCR10_PATH = "/sys/class/tpm/tpm0/pcr-sha256/10"
+        
+        # Persistent IMA fd for incremental reads (avoids O(N²) start() re-traversal)
+        self._ima_fd = None
+        self._ima_lines_read = 0
         
         # Statistics
         self.stats = {
@@ -267,18 +272,77 @@ class TDXAttestationServer:
             pass
         return ''
     
-    def read_ima_log(self) -> tuple:
+    def read_ima_count(self) -> int:
+        """
+        O(1) check: read runtime_measurements_count from kernel.
+        
+        Returns:
+            Number of IMA entries, or -1 if unavailable
+        """
+        try:
+            with open(self.IMA_COUNT_PATH, 'r') as f:
+                return int(f.read().strip())
+        except Exception:
+            return -1
+    
+    def read_ima_log(self, offset: int = 0) -> tuple:
         """
         Read the IMA event log from the kernel.
         
+        Args:
+            offset: Number of entries already verified by the controller.
+                    0 = full replay (close/reopen fd, read everything)
+                    >0 = incremental (use persistent fd, read only new entries)
+        
         Returns:
-            Tuple of (log_text, entry_count) or ("", 0) if unavailable
+            Tuple of (log_text, total_entry_count) or ("", 0) if unavailable
         """
         try:
-            with open(self.IMA_LOG_PATH, 'r') as f:
-                log_text = f.read()
-            entry_count = len([l for l in log_text.strip().split('\n') if l.strip()])
-            return log_text, entry_count
+            if offset == 0:
+                # Full replay: close any existing fd, reopen fresh
+                if self._ima_fd:
+                    try:
+                        self._ima_fd.close()
+                    except Exception:
+                        pass
+                    self._ima_fd = None
+                
+                self._ima_fd = open(self.IMA_LOG_PATH, 'r')
+                lines = self._ima_fd.readlines()
+                self._ima_lines_read = len(lines)
+                log_text = ''.join(lines)
+                entry_count = len([l for l in lines if l.strip()])
+                return log_text, entry_count
+            else:
+                # Incremental: use persistent fd, read delta
+                # First check if there are new entries
+                current_count = self.read_ima_count()
+                if current_count >= 0 and current_count <= offset:
+                    # No new entries
+                    return "", current_count
+                
+                # If fd was lost (shouldn't happen), reopen and skip to offset
+                if self._ima_fd is None or self._ima_fd.closed:
+                    self._ima_fd = open(self.IMA_LOG_PATH, 'r')
+                    # Must skip to offset position (triggers start() traversals)
+                    for _ in range(offset):
+                        line = self._ima_fd.readline()
+                        if not line:
+                            break
+                    self._ima_lines_read = offset
+                
+                # Read new lines from current fd position
+                new_lines = self._ima_fd.readlines()
+                self._ima_lines_read += len(new_lines)
+                
+                if not new_lines:
+                    return "", self._ima_lines_read
+                
+                delta_text = ''.join(new_lines)
+                delta_count = len([l for l in new_lines if l.strip()])
+                # Return delta text and total count
+                return delta_text, self._ima_lines_read
+                
         except FileNotFoundError:
             return "", 0
         except PermissionError:
@@ -360,7 +424,8 @@ class TDXAttestationServer:
             
             # Layer 2: Collect IMA runtime integrity data
             if self.enable_ima:
-                ima_log_text, entry_count = self.read_ima_log()
+                ima_offset = getattr(request, 'ima_offset', 0)
+                ima_log_text, entry_count = self.read_ima_log(offset=ima_offset)
                 pcr10_value = self.read_pcr10()
                 
                 if ima_log_text:
@@ -369,7 +434,15 @@ class TDXAttestationServer:
                     ).decode('ascii')
                     response.ima_entry_count = entry_count
                     response.pcr10 = pcr10_value
-                    print(f"    [IMA] Included {entry_count} IMA entries, PCR10={pcr10_value[:16]}...")
+                    mode = "delta" if ima_offset > 0 else "full"
+                    delta_lines = len([l for l in ima_log_text.strip().split('\n') if l.strip()])
+                    print(f"    [IMA] {mode}: sent {delta_lines} entries (total={entry_count}), PCR10={pcr10_value[:16]}...")
+                elif entry_count > 0 and ima_offset > 0:
+                    # No new entries but log exists (incremental, no delta)
+                    response.ima_entry_count = entry_count
+                    response.pcr10 = pcr10_value
+                    response.ima_log = ""  # empty = no new entries
+                    print(f"    [IMA] incremental: no new entries (total={entry_count})")
                 else:
                     print(f"    [IMA] IMA log not available")
             

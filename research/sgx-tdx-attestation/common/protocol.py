@@ -49,6 +49,7 @@ class AttestationRequest:
     action: str = "attest"
     nonce: str = ""  # Base64 encoded 32-byte nonce
     attestation_method: str = METHOD_ITA  # "ita" or "dcap"
+    ima_offset: int = 0  # IMA entry offset (0 = full replay, >0 = incremental delta)
     protocol_version: str = PROTOCOL_VERSION
     timestamp: float = field(default_factory=time.time)
     
@@ -57,6 +58,7 @@ class AttestationRequest:
             "action": self.action,
             "nonce": self.nonce,
             "attestation_method": self.attestation_method,
+            "ima_offset": self.ima_offset,
             "protocol_version": self.protocol_version,
             "timestamp": self.timestamp
         })
@@ -68,6 +70,7 @@ class AttestationRequest:
             action=d.get("action", "attest"),
             nonce=d.get("nonce", ""),
             attestation_method=d.get("attestation_method", METHOD_ITA),
+            ima_offset=d.get("ima_offset", 0),
             protocol_version=d.get("protocol_version", PROTOCOL_VERSION),
             timestamp=d.get("timestamp", time.time())
         )
