@@ -449,7 +449,7 @@ def receive_message(sock, timeout: float = 30.0) -> str:
         if not chunk:
             break
         buffer += chunk
-        if len(buffer) > 10_000_000:  # 10MB max (IMA logs can be large)
+        if len(buffer) > 50_000_000:  # 50MB max (IMA logs can be very large)
             raise ProtocolError("Message too large")
     
     if MESSAGE_DELIMITER in buffer:
