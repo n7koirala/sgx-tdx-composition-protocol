@@ -62,7 +62,7 @@ sgx.remote_attestation = "dcap"
 sgx.debug = true
 
 # Enclave size - Python with SSL needs substantial memory
-sgx.enclave_size = "1G"
+sgx.enclave_size = "2G"
 
 # Maximum number of threads
 sgx.max_threads = 32

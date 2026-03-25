@@ -442,19 +442,23 @@ def send_message(sock, message: str):
     sock.sendall(data)
 
 def receive_message(sock, timeout: float = 120.0) -> str:
-    """Receive a framed message from socket"""
+    """Receive a framed message from socket (memory-efficient for SGX)"""
     sock.settimeout(timeout)
-    buffer = b""
+    # Use bytearray for O(1) appends instead of bytes += which copies every time
+    buffer = bytearray()
     while MESSAGE_DELIMITER not in buffer:
-        chunk = sock.recv(65536)  # 64KB buffer for throughput
+        chunk = sock.recv(65536)  # 64KB recv buffer
         if not chunk:
             break
-        buffer += chunk
-        if len(buffer) > 50_000_000:  # 50MB max
+        buffer.extend(chunk)
+        if len(buffer) > 70_000_000:  # 70MB max
             raise ProtocolError("Message too large")
     
-    if MESSAGE_DELIMITER in buffer:
-        message, _ = buffer.split(MESSAGE_DELIMITER, 1)
+    buf_bytes = bytes(buffer)
+    del buffer  # Free the bytearray immediately
+    
+    if MESSAGE_DELIMITER in buf_bytes:
+        message, _ = buf_bytes.split(MESSAGE_DELIMITER, 1)
         return message.decode('utf-8')
     
     raise ProtocolError("Incomplete message received")
