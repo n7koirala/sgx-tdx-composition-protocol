@@ -298,7 +298,7 @@ Examples:
                         help="Attestation rounds per strategy (default: 10)")
     parser.add_argument("--no-verify", action="store_true", help="Skip TLS cert verification")
     parser.add_argument("--ca-cert", help="CA certificate for TLS")
-    parser.add_argument("--output", default="benchmark_e2e_results.csv", help="Output CSV file")
+    parser.add_argument("--output", default="/tmp/benchmark_e2e_results.csv", help="Output CSV file")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
 
     args = parser.parse_args()

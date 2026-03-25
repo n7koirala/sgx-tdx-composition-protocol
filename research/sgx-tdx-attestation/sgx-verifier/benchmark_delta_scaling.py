@@ -108,7 +108,7 @@ def main():
     parser.add_argument("--method", default=METHOD_DCAP)
     parser.add_argument("--no-verify", action="store_true")
     parser.add_argument("--ca-cert", default=None)
-    parser.add_argument("--output", default="benchmark_delta_scaling.csv")
+    parser.add_argument("--output", default="/tmp/benchmark_delta_scaling.csv")
     parser.add_argument("--deltas", default="0",
                         help="Comma-separated delta sizes to test (default: 0). "
                              "Run generate_ima_entries.py on CVM before each non-zero delta.")

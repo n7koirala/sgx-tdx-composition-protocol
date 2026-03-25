@@ -211,6 +211,67 @@ run-controller-python:
 		--verbose
 
 # ============================================================================
+# Benchmark Targets
+# ============================================================================
+
+# Benchmark configuration
+ROUNDS ?= 5
+STRATEGY ?= both
+DELTAS ?= 100,500,1000,5000,10000
+
+# Run e2e benchmark inside SGX enclave
+bench-sgx: all
+	@echo ""
+	@echo "Running E2E IMA benchmark inside SGX enclave..."
+	@echo "Target: $(TDX_HOST):$(TDX_PORT)  Strategy: $(STRATEGY)  Rounds: $(ROUNDS)"
+	@echo "========================================"
+	gramine-sgx ./verifier /app/sgx-verifier/benchmark_e2e.py \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--strategy $(STRATEGY) \
+		--no-verify \
+		--rounds $(ROUNDS) \
+		--output /tmp/benchmark_e2e_sgx.csv
+
+# Run e2e benchmark in pure Python (no SGX, for comparison)
+bench-python:
+	@echo ""
+	@echo "Running E2E IMA benchmark in pure Python (no SGX)..."
+	@echo "========================================"
+	PYTHONPATH=$(APP_DIR) python3 benchmark_e2e.py \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--strategy $(STRATEGY) \
+		--no-verify \
+		--rounds $(ROUNDS) \
+		--output benchmark_e2e_python.csv
+
+# Run delta scaling benchmark inside SGX enclave
+bench-delta-sgx: all
+	@echo ""
+	@echo "Running Delta Scaling benchmark inside SGX enclave..."
+	@echo "Deltas: $(DELTAS)"
+	@echo "========================================"
+	gramine-sgx ./verifier /app/sgx-verifier/benchmark_delta_scaling.py \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--no-verify \
+		--deltas $(DELTAS) \
+		--output /tmp/benchmark_delta_sgx.csv
+
+# Run delta scaling benchmark in pure Python (no SGX)
+bench-delta-python:
+	@echo ""
+	@echo "Running Delta Scaling benchmark in pure Python (no SGX)..."
+	@echo "========================================"
+	PYTHONPATH=$(APP_DIR) python3 benchmark_delta_scaling.py \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--no-verify \
+		--deltas $(DELTAS) \
+		--output benchmark_delta_python.csv
+
+# ============================================================================
 # Certificate Generation
 # ============================================================================
 
