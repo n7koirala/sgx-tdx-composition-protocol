@@ -437,19 +437,20 @@ MESSAGE_DELIMITER = b'\n---END---\n'
 
 def send_message(sock, message: str):
     """Send a framed message over socket"""
+    sock.settimeout(120)  # 120s timeout for large IMA log sends
     data = message.encode('utf-8') + MESSAGE_DELIMITER
     sock.sendall(data)
 
-def receive_message(sock, timeout: float = 30.0) -> str:
+def receive_message(sock, timeout: float = 120.0) -> str:
     """Receive a framed message from socket"""
     sock.settimeout(timeout)
     buffer = b""
     while MESSAGE_DELIMITER not in buffer:
-        chunk = sock.recv(4096)
+        chunk = sock.recv(65536)  # 64KB buffer for throughput
         if not chunk:
             break
         buffer += chunk
-        if len(buffer) > 50_000_000:  # 50MB max (IMA logs can be very large)
+        if len(buffer) > 50_000_000:  # 50MB max
             raise ProtocolError("Message too large")
     
     if MESSAGE_DELIMITER in buffer:
