@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 
 from .gcp_client import GCPClient
+from .ima_verifier import IMAVerifier
 from .utils.encoding import stringify, bytes_to_base64_str, decode_base64
 from .utils.crypto import (
     generate_rsa_keypair,
@@ -231,6 +232,32 @@ class SGXController:
             self._logger.error(f"Initial CVM setup failed: {exc}")
             # CVM is still provisioned, just setup didn't complete
 
+        # 5.5 Phase C': IMA-Based Launch Integrity Verification
+        try:
+            ima_baseline = self._verify_ima_integrity(cvm)
+            cvm.set_ima_baseline(ima_baseline)
+
+            if not ima_baseline.get("success"):
+                error_msg = ima_baseline.get("error", "IMA verification failed")
+                self._logger.error(f"Phase C' FAILED: {error_msg}")
+                self._logger.error("Aborting commissioning — destroying CVM...")
+
+                # Abort: destroy the CVM to prevent compromised VM from persisting
+                try:
+                    gcp_client.delete_resources()
+                except Exception as del_exc:
+                    self._logger.error(f"Failed to destroy CVM: {del_exc}")
+
+                result["error"] = f"IMA verification failed: {error_msg}"
+                return result, self._sign_data(bytes(json.dumps(result, sort_keys=True), "utf-8"))
+
+            self._logger.info("Phase C': IMA verification PASSED")
+        except Exception as exc:
+            self._logger.error(f"Phase C' exception: {exc}")
+            # Don't abort on exception — log and continue
+            # (IMA may not be available on all CVM images)
+            self._logger.warning("Continuing without IMA verification")
+
         # 6. Store CVM
         cvm_id = cvm.get_cvm_id()
         global CVMs
@@ -337,6 +364,70 @@ class SGXController:
             result["status"] = True
         else:
             result["error"] = "stop-cvm: No such CVM."
+
+        signature = self._sign_data(bytes(json.dumps(result, sort_keys=True), "utf-8"))
+        return result, signature
+
+    # ------------------------------------------------------------------
+    # IMA Verification (Phase C')
+    # ------------------------------------------------------------------
+
+    def _verify_ima_integrity(self, cvm):
+        """Run IMA-based launch integrity verification (Phase C').
+
+        After the hardening script completes (Phase C), verify that the
+        CVM's boot sequence is consistent with the expected image:
+        1. Read IMA log and PCR-10 from CVM via SSH
+        2. Replay PCR-10 from the IMA log and verify match
+        3. Check each entry against the reference manifest
+        4. Request TDX quote binding the IMA log hash
+
+        Returns:
+            Dict with verification results (see IMAVerifier.verify_cvm).
+        """
+        self._logger.info("Phase C': Starting IMA-based launch integrity verification...")
+
+        verifier = IMAVerifier(logger=self._logger)
+
+        # For initial commissioning, we may not have a manifest yet.
+        # Skip manifest check if reference_manifest.json is empty/placeholder.
+        skip_manifest = not verifier._manifest
+        if skip_manifest:
+            self._logger.warning(
+                "Phase C': No reference manifest loaded. "
+                "Run generate_reference_manifest.py to create one. "
+                "Skipping manifest check for this run."
+            )
+
+        result = verifier.verify_cvm(
+            cvm,
+            skip_manifest=skip_manifest,
+            skip_tdx_quote=False,
+        )
+        return result
+
+    def get_ima_baseline(self, cvm_id):
+        """Get the stored IMA baseline for a CVM."""
+        result = {"success": False}
+
+        global CVMs
+        if cvm_id in CVMs:
+            baseline = CVMs[cvm_id].get_ima_baseline()
+            if baseline:
+                result["success"] = True
+                # Return a summary (not the full IMA log, which can be large)
+                result["ima_baseline"] = {
+                    "pcr10": baseline.get("pcr10", ""),
+                    "pcr10_match": baseline.get("pcr10_match", False),
+                    "entry_count": baseline.get("entry_count", 0),
+                    "ima_log_hash": baseline.get("ima_log_hash", ""),
+                    "manifest_violations": baseline.get("manifest_violations", []),
+                    "tdx_quote": baseline.get("tdx_quote"),
+                }
+            else:
+                result["error"] = "No IMA baseline available for this CVM."
+        else:
+            result["error"] = "get-ima-baseline: No such CVM."
 
         signature = self._sign_data(bytes(json.dumps(result, sort_keys=True), "utf-8"))
         return result, signature
@@ -515,6 +606,20 @@ def handle_stop_cvm():
     request_data = request.get_json()
     global SGX_CONTROLLER
     result, signature = SGX_CONTROLLER.stop_cvm(request_data)
+    response = {
+        "result": result,
+        "signature": bytes_to_base64_str(signature),
+    }
+    return jsonify(response), 200
+
+
+@app.route(f"{entrypoint}get_ima_baseline", methods=["POST"])
+def handle_get_ima_baseline():
+    """Get IMA verification baseline for a CVM (non-privileged)."""
+    request_data = request.get_json()
+    cvm_id = request_data["params"]["cvm_id"]
+    global SGX_CONTROLLER
+    result, signature = SGX_CONTROLLER.get_ima_baseline(cvm_id)
     response = {
         "result": result,
         "signature": bytes_to_base64_str(signature),

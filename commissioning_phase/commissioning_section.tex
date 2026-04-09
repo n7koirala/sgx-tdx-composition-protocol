@@ -1,0 +1,402 @@
+% =====================================================================
+% CVM Commissioning Phase — LaTeX Section
+% 
+% This section can be included in the main paper via:
+%   \input{commissioning_phase/commissioning_section.tex}
+%
+% Required packages (add to preamble if not already present):
+%   \usepackage{algorithm}
+%   \usepackage{algpseudocode}
+%   \usepackage{amsmath}
+%   \usepackage{booktabs}
+% =====================================================================
+
+\section{CVM Commissioning Phase}
+\label{sec:commissioning}
+
+The commissioning phase constitutes the launch and initial configuration of the Confidential Virtual Machine (CVM). In our protocol, the CVM is a TDX Trust Domain provisioned on Google Cloud Platform, and the controller is an SGX enclave that acts as the sole administrative authority over the CVM after launch. This section describes how the CVM is launched upon the Application Service Provider's (ASP's) request, and how we guarantee that the SGX controller is the \emph{only} entity capable of accessing and modifying the CVM post-launch.
+
+\subsection{Threat Model}
+\label{sec:commissioning:threat}
+
+We consider the following adversaries during the commissioning phase:
+
+\begin{enumerate}
+    \item \textbf{Unauthorized launch requests.} A malicious party attempts to trigger CVM provisioning without authorization from the ASP.
+    \item \textbf{Cloud provider (infrastructure adversary).} The cloud provider (GCP) is untrusted with respect to confidentiality. While it faithfully executes the TDX launch (as enforced by hardware), it may attempt to gain SSH access to the running CVM through control-plane mechanisms (e.g., IAM-based SSH key injection).
+    \item \textbf{Project-level IAM adversary.} An entity with GCP project IAM privileges (e.g., \texttt{compute.admin}) may attempt to inject SSH keys into the CVM's metadata, which the guest agent would normally propagate to \texttt{authorized\_keys}.
+    \item \textbf{ASP itself.} The ASP can request CVM operations but should not be able to directly SSH into the CVM. All CVM interactions must be mediated through the controller.
+\end{enumerate}
+
+The TDX hardware is trusted to provide memory isolation and integrity for the CVM's Trust Domain. The SGX hardware is trusted to protect the controller enclave's code and data, including cryptographic keys.
+
+\subsection{Notation}
+\label{sec:commissioning:notation}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$\mathcal{C}$ & SGX controller (enclave) \\
+$\mathcal{A}$ & Application Service Provider (ASP / service owner) \\
+$\mathcal{V}$ & TDX Confidential Virtual Machine (CVM) \\
+$(pk_\mathcal{C}, sk_\mathcal{C})$ & Controller's RSA key pair (generated inside enclave) \\
+$(pk_\mathcal{A}, sk_\mathcal{A})$ & ASP's RSA key pair (for request authentication) \\
+$(pk_{\text{ssh}}, sk_{\text{ssh}})$ & Ephemeral SSH key pair (generated inside enclave per CVM) \\
+$\textsf{Sign}(sk, m)$ & RSA-PSS signature of message $m$ with private key $sk$ \\
+$\textsf{Verify}(pk, m, \sigma)$ & Verification of signature $\sigma$ on $m$ with public key $pk$ \\
+$\textsf{H}(\cdot)$ & SHA-256 hash function \\
+$Q_\mathcal{C}$ & SGX attestation quote of the controller enclave \\
+$Q_\mathcal{V}$ & TDX attestation quote of the CVM \\
+$\mathcal{M}_{\text{ref}}$ & Reference manifest (allowlist of known-good file hashes) \\
+\bottomrule
+\end{tabular}
+\caption{Notation for the commissioning phase.}
+\label{tab:notation}
+\end{table}
+
+\subsection{Protocol Overview}
+\label{sec:commissioning:overview}
+
+The commissioning phase consists of four stages: (1)~authenticated launch request, (2)~CVM provisioning with ephemeral SSH key injection, (2.5)~IMA-based launch integrity verification, and (3)~post-launch SSH exclusivity hardening. We describe each stage formally below.
+
+\subsection{Stage 1: Authenticated Launch Request}
+\label{sec:commissioning:stage1}
+
+Before any CVM is provisioned, the ASP must authenticate itself to the controller. This is a prerequisite to prevent unauthorized parties from consuming cloud resources.
+
+\subsubsection{Controller Initialization}
+Upon startup, the controller $\mathcal{C}$ (running inside an SGX enclave via Gramine) performs the following:
+
+\begin{enumerate}
+    \item Generates an RSA-4096 key pair $(pk_\mathcal{C}, sk_\mathcal{C})$ inside the enclave. If a sealed copy exists from a prior run, it is loaded instead, ensuring key persistence across restarts.
+    \item Computes $h_\mathcal{C} = \textsf{H}(pk_\mathcal{C})$ and writes $h_\mathcal{C}$ to \texttt{/dev/attestation/user\_report\_data}, binding the controller's public key to the enclave's identity.
+    \item Loads the ASP's public key $pk_\mathcal{A}$ from a pre-provisioned file. This key is used to verify signatures on privileged requests.
+\end{enumerate}
+
+\noindent The binding of $pk_\mathcal{C}$ into the SGX report data ensures that any client can verify---via remote attestation---that the public key it receives genuinely belongs to the enclave with measurements $(\textsc{MrEnclave}, \textsc{MrSigner})$.
+
+\subsubsection{ASP Verification of Controller}
+Before issuing any request, the ASP $\mathcal{A}$ verifies the controller:
+
+\begin{enumerate}
+    \item $\mathcal{A}$ retrieves the controller's quote $Q_\mathcal{C}$ and public key $pk_\mathcal{C}$ via the \texttt{GET /quote} endpoint.
+    \item $\mathcal{A}$ verifies $Q_\mathcal{C}$ through SGX remote attestation (e.g., via Intel's attestation service or DCAP).
+    \item $\mathcal{A}$ extracts $h_\mathcal{C}' = Q_\mathcal{C}.\texttt{report\_data}[0{:}32]$ and checks $h_\mathcal{C}' \stackrel{?}{=} \textsf{H}(pk_\mathcal{C})$.
+\end{enumerate}
+
+\noindent If verification succeeds, $\mathcal{A}$ is assured that $pk_\mathcal{C}$ belongs to a genuine SGX enclave with the expected code identity.
+
+\subsubsection{Signed Launch Request}
+The ASP sends a signed request to launch a CVM:
+
+\begin{enumerate}
+    \item $\mathcal{A}$ constructs parameters $\texttt{params} = \{\texttt{cvm\_type}: \texttt{``tdx''}\}$.
+    \item $\mathcal{A}$ computes $\sigma_\mathcal{A} = \textsf{Sign}(sk_\mathcal{A}, \texttt{canonical}(\texttt{params}))$, where $\texttt{canonical}(\cdot)$ denotes deterministic JSON serialization.
+    \item $\mathcal{A}$ sends $(\texttt{params}, \sigma_\mathcal{A})$ to the controller's \texttt{POST /start\_cvm} endpoint.
+    \item The controller verifies: $\textsf{Verify}(pk_\mathcal{A}, \texttt{canonical}(\texttt{params}), \sigma_\mathcal{A}) \stackrel{?}{=} \texttt{true}$. If verification fails, the request is rejected.
+\end{enumerate}
+
+\subsection{Stage 2: CVM Provisioning with Ephemeral Key Injection}
+\label{sec:commissioning:stage2}
+
+Upon successful authentication, the controller provisions the CVM. The critical security property is that the SSH private key is generated \emph{inside} the enclave and never leaves it.
+
+\begin{algorithm}[t]
+\caption{CVM Commissioning Protocol (executed inside $\mathcal{C}$)}
+\label{alg:commissioning}
+\begin{algorithmic}[1]
+\Require Verified ASP request $(\texttt{params}, \sigma_\mathcal{A})$
+\Ensure CVM $\mathcal{V}$ launched with SGX-exclusive SSH access
+
+\Statex \textbf{Phase A: Ephemeral Key Generation}
+\State $(pk_{\text{ssh}}, sk_{\text{ssh}}) \leftarrow \textsf{GenRSA}(4096)$ \Comment{Generated inside enclave}
+\State $pk_{\text{ssh}}^{\text{openssh}} \leftarrow \textsf{SerializeOpenSSH}(pk_{\text{ssh}})$
+\State $sk_{\text{ssh}}^{\text{pem}} \leftarrow \textsf{SerializePEM}(sk_{\text{ssh}})$ \Comment{Stays in enclave memory}
+
+\Statex
+\Statex \textbf{Phase B: Infrastructure Provisioning}
+\State $\texttt{ip}_\mathcal{C} \leftarrow \textsf{GetExternalIP}()$ \Comment{Controller's external IP}
+\State Create firewall rule: allow TCP:22 from $\texttt{ip}_\mathcal{C}/32$ only, tag $\leftarrow$ \texttt{sgx-tdx-cvm}
+\State Create TDX VM $\mathcal{V}$ on GCP with:
+\State \quad Machine type: \texttt{c3-standard-4} (Intel TDX capable)
+\State \quad $\texttt{confidential\_compute\_type} \leftarrow \texttt{TDX}$
+\State \quad $\texttt{metadata[ssh\text{-}keys]} \leftarrow \texttt{username}:pk_{\text{ssh}}^{\text{openssh}}$
+\State \quad $\texttt{metadata[block\text{-}project\text{-}ssh\text{-}keys]} \leftarrow \texttt{TRUE}$
+\State \quad $\texttt{metadata[enable\text{-}guest\text{-}attributes]} \leftarrow \texttt{FALSE}$
+\State \quad $\texttt{metadata[enable\text{-}oslogin]} \leftarrow \texttt{FALSE}$
+\State \quad Network tag $\leftarrow$ \texttt{sgx-tdx-cvm}
+\State $\texttt{ip}_\mathcal{V} \leftarrow$ external IP of $\mathcal{V}$
+
+\Statex
+\Statex \textbf{Phase C: Post-Launch Hardening (via SSH)}
+\State Wait for $\mathcal{V}$ to boot
+\State SSH into $\mathcal{V}$ using $sk_{\text{ssh}}^{\text{pem}}$
+\State Execute SSH hardening script on $\mathcal{V}$ (see Section~\ref{sec:commissioning:stage3})
+\State Disconnect SSH session
+
+\Statex
+\Statex \textbf{Phase C$'$: IMA-Based Launch Integrity Verification}
+\State SSH into $\mathcal{V}$ using $sk_{\text{ssh}}^{\text{pem}}$
+\State $\texttt{ima\_log} \leftarrow \textsf{Read}(\texttt{/sys/kernel/security/ima/ascii\_runtime\_measurements})$
+\State $\texttt{pcr10} \leftarrow \textsf{Read}(\texttt{/sys/class/tpm/tpm0/pcr-sha256/10})$
+\State $\texttt{pcr10}' \leftarrow \textsf{ReplayIMALog}(\texttt{ima\_log})$ \Comment{Recompute PCR-10 from log}
+\State \textbf{assert} $\texttt{pcr10}' = \texttt{pcr10}$ \Comment{Log integrity check}
+\For{each entry $e \in \texttt{ima\_log}$}
+    \State \textbf{assert} $e.\texttt{file\_hash} \in \mathcal{M}_{\text{ref}}$ \Comment{Check against reference manifest}
+\EndFor
+\State $Q_\mathcal{V} \leftarrow \textsf{GetTDXQuote}(\mathcal{V}, \textsf{H}(\texttt{ima\_log}))$ \Comment{Bind IMA log to TDX quote}
+\State Verify $Q_\mathcal{V}$: check MRTD, RTMRs, and nonce binding
+\State $\texttt{baseline} \leftarrow (\texttt{ima\_log}, \texttt{pcr10}, Q_\mathcal{V})$ \Comment{Store as commissioning baseline}
+
+\Statex
+\Statex \textbf{Phase D: State Registration}
+\State $\texttt{cvm\_id} \leftarrow \textsf{H}(pk_{\text{ssh}}^{\text{openssh}})$
+\State Store $(\texttt{cvm\_id}, \mathcal{V}, sk_{\text{ssh}}, \texttt{baseline})$ in enclave memory
+\State $\texttt{result} \leftarrow \{\texttt{success}: \texttt{true}, \texttt{cvm\_id}, \texttt{ip}_\mathcal{V}\}$
+\State $\sigma_\mathcal{C} \leftarrow \textsf{Sign}(sk_\mathcal{C}, \texttt{canonical}(\texttt{result}))$
+\State \Return $(\texttt{result}, \sigma_\mathcal{C})$ to $\mathcal{A}$
+\end{algorithmic}
+\end{algorithm}
+
+The key observations about Algorithm~\ref{alg:commissioning} are:
+
+\begin{itemize}
+    \item \textbf{Lines 1--3}: The ephemeral SSH key pair is generated entirely within the SGX enclave. The private key $sk_{\text{ssh}}$ is held in enclave-protected memory and is never written to disk, transmitted over the network, or exposed to the host OS.
+    \item \textbf{Lines 6--14}: The GCP Compute Engine API call is the programmatic equivalent of:
+    \begin{verbatim}
+    gcloud compute instances create sgx-tdx-cvm-{uuid} \
+      --machine-type=c3-standard-4 \
+      --confidential-compute-type=TDX \
+      --maintenance-policy=TERMINATE \
+      --image-family=ubuntu-2204-lts \
+      --image-project=ubuntu-os-cloud \
+      --metadata=ssh-keys="cvm:{public_key}" \
+      --metadata=block-project-ssh-keys=TRUE \
+      --metadata=enable-oslogin=FALSE
+    \end{verbatim}
+    The \texttt{--confidential-compute-type=TDX} flag instructs GCP to create a TDX Trust Domain, where the TDX hardware measures the VM image into $\texttt{MRTD}$ during launch---this measurement is tamper-proof and verifiable through remote attestation.
+    \item \textbf{Lines 20--21}: The controller signs the result, allowing $\mathcal{A}$ to verify the authenticity of the response.
+\end{itemize}
+
+\subsection{Stage 2.5: IMA-Based Launch Integrity Verification}
+\label{sec:commissioning:ima}
+
+While TDX hardware attestation verifies the integrity of the CVM's
+initial memory layout (firmware, kernel, and initrd) via the
+$\texttt{MRTD}$ register, it does not capture the behavior of the
+system \emph{after} the kernel begins execution.  A subtly
+tampered CVM image could contain a malicious systemd service, a
+modified shared library, or a trojanized binary that activates only
+post-boot---all of which would produce an identical $\texttt{MRTD}$
+to the clean image, since the initial memory layout is unchanged.
+This gap is not addressed by prior work~\cite{akkus2024duet}, which
+retrieves and stores the TDX attestation report but does not perform
+fine-grained verification of the CVM's post-boot execution state.
+
+We close this gap by leveraging Linux IMA~\cite{sailer2004ima}, which
+maintains a kernel-level measurement log of every file executed,
+mapped, or opened on the system.  IMA records each file's path and
+cryptographic hash (SHA-256), and extends a running aggregate into
+the vTPM's PCR-10 register, creating a tamper-evident chain from
+boot to the present.  After the hardening script completes
+(Phase~C), but before the controller declares commissioning
+complete, it performs the following IMA-based verification
+(Phase~C$'$ of Algorithm~\ref{alg:commissioning}):
+
+\paragraph{IMA log retrieval and replay.}
+The controller reads the full IMA measurement log from
+\texttt{/sys/kernel/security/ima/ascii\_runtime\_measurements}
+and the current PCR-10 aggregate from
+\texttt{/sys/class/tpm/tpm0/pcr-sha256/10}.  It then replays the
+log by recomputing the PCR-10 chain: starting from a zero-initialized
+register, for each entry $e_i$ in the log, it computes
+$\texttt{pcr10}_{i} = \textsf{H}(\texttt{pcr10}_{i-1} \| e_i.\texttt{template\_hash})$.
+If the replayed value matches the live PCR-10, the log has not been
+truncated or tampered with.
+
+\paragraph{Reference manifest verification.}
+Each entry in the IMA log is checked against a \emph{reference
+manifest} $\mathcal{M}_{\text{ref}}$---a pre-computed allowlist of
+$(file\_path, sha256\_hash)$ pairs corresponding to the known-good
+Ubuntu 22.04 CVM image plus the expected modifications from the
+hardening script.  $\mathcal{M}_{\text{ref}}$ is derived from a
+reproducible build of the CVM image and is embedded in the
+controller's enclave code (and thus covered by
+$\textsc{MrEnclave}$).  Any IMA entry whose hash does not appear in
+$\mathcal{M}_{\text{ref}}$ indicates an unexpected file execution
+during boot---potentially a backdoor, rootkit, or tampered
+binary---and causes the controller to abort commissioning and destroy
+the CVM.
+
+\paragraph{Binding IMA state to TDX attestation.}
+To cryptographically bind the IMA verification to the CVM's hardware
+identity, the controller requests a TDX attestation quote
+$Q_\mathcal{V}$ with
+$\texttt{report\_data} = \textsf{H}(\texttt{ima\_log})$, embedding
+the hash of the full IMA log into the hardware-signed quote.  This
+creates an unforgeable link between the TDX platform identity
+($\texttt{MRTD}$, RTMRs), the runtime boot state (IMA log), and the
+controller's verification (the quote is requested by the controller
+over the attested SSH channel).  The tuple
+$(\texttt{ima\_log}, \texttt{pcr10}, Q_\mathcal{V})$ is stored as
+the \emph{commissioning baseline}---the ground truth against which
+all subsequent runtime attestations are compared.
+
+\paragraph{Detecting post-boot tampering.}
+This IMA-based verification detects several classes of attacks that
+TDX attestation alone cannot:
+\begin{itemize}[nosep]
+    \item A malicious systemd service injected into the image that
+    executes during boot (its binary hash would not appear in
+    $\mathcal{M}_{\text{ref}}$).
+    \item A modified shared library (e.g., a trojanized
+    \texttt{libssl.so}) that is loaded by legitimate services (its
+    hash would differ from the reference).
+    \item A cron job or init script that exfiltrates data or opens a
+    reverse shell (the executed binary would be measured by IMA).
+    \item Unauthorized kernel modules loaded during boot (each
+    \texttt{insmod} is recorded in the IMA log).
+\end{itemize}
+
+\noindent After Phase~C$'$ succeeds, the controller proceeds to
+Phase~D (state registration), confident that the CVM's boot
+sequence is consistent with the expected image and that no
+unauthorized code was executed.  This IMA-verified commissioning
+baseline then serves as the starting point for the incremental
+runtime attestation protocol described in
+Section~\ref{sec:runtime}.
+
+\subsection{Stage 3: Ensuring SGX-Exclusive SSH Access}
+\label{sec:commissioning:stage3}
+
+A critical invariant of our protocol is:
+
+\begin{quote}
+\textbf{Invariant 1.} After commissioning completes, the SGX controller $\mathcal{C}$ is the \emph{only} entity that can establish an SSH connection to the CVM $\mathcal{V}$. No other party---including the ASP $\mathcal{A}$, the cloud provider, or any GCP project IAM principal---can SSH into $\mathcal{V}$.
+\end{quote}
+
+We enforce this invariant through five complementary layers of defense, summarized in Table~\ref{tab:ssh-hardening}.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}llp{6.5cm}@{}}
+\toprule
+\textbf{Layer} & \textbf{Enforcement Point} & \textbf{Mechanism} \\
+\midrule
+L1: Ephemeral key & SGX enclave & SSH private key $sk_{\text{ssh}}$ generated and held exclusively in enclave memory. Never persisted to disk or transmitted. \\
+L2: Network firewall & GCP control plane & Firewall rule restricts TCP port 22 ingress to $\texttt{ip}_\mathcal{C}/32$ (controller's IP only). \\
+L3: Metadata isolation & GCP VM metadata & \texttt{block-project-ssh-keys=TRUE} prevents project-level SSH key injection. \texttt{enable-oslogin=FALSE} disables OS Login. \\
+L4: Guest agent disablement & CVM OS & The GCP guest agent's SSH key management is disabled: \texttt{AuthorizedKeysCommand} removed from sshd, \texttt{AccountManager} daemon disabled. \\
+L5: File immutability & CVM filesystem & \texttt{authorized\_keys} is set to immutable via \texttt{chattr +i}. Even \texttt{root} cannot modify it without first removing the flag. \\
+\bottomrule
+\end{tabular}
+\caption{Defense-in-depth layers ensuring SGX-exclusive SSH access to the CVM.}
+\label{tab:ssh-hardening}
+\end{table}
+
+\subsubsection{Layer 1: Ephemeral Key Confinement}
+
+The SSH key pair $(pk_{\text{ssh}}, sk_{\text{ssh}})$ is generated by the controller inside the SGX enclave using RSA-4096. The private key $sk_{\text{ssh}}$ resides only in the enclave's encrypted memory region (EPC), which is hardware-protected against access by the host OS, hypervisor, and other processes. Specifically:
+
+\begin{itemize}
+    \item $sk_{\text{ssh}}$ is never written to persistent storage (unlike the controller's identity key $sk_\mathcal{C}$, which is sealed for persistence).
+    \item $sk_{\text{ssh}}$ is never included in any network message. Only $pk_{\text{ssh}}$ is transmitted---to the GCP API for VM metadata injection.
+    \item If the controller enclave is destroyed or restarted, $sk_{\text{ssh}}$ is lost. This is acceptable: the CVM would need to be decommissioned and re-provisioned.
+\end{itemize}
+
+\subsubsection{Layer 2: Network-Level Restriction}
+
+Before provisioning the CVM, the controller creates a GCP firewall rule:
+
+\begin{verbatim}
+    gcloud compute firewall-rules create sgx-tdx-cvm-fw-ssh \
+      --allow tcp:22 \
+      --source-ranges={controller_ip}/32 \
+      --target-tags=sgx-tdx-cvm
+\end{verbatim}
+
+The CVM is tagged with \texttt{sgx-tdx-cvm}, and the firewall rule permits SSH ingress \emph{only} from the controller's external IP. This means that even if an adversary obtained a valid SSH key (which should not happen due to Layer~1), they could not establish a TCP connection to port 22 from any other IP address.
+
+\subsubsection{Layer 3: GCP Metadata Isolation}
+
+GCP provides several metadata-based mechanisms for injecting SSH keys into running VMs. We disable all of them at VM creation time via instance metadata flags:
+
+\begin{itemize}
+    \item \texttt{block-project-ssh-keys = TRUE}: Prevents SSH keys defined at the \emph{GCP project level} from being propagated to the VM. By default, GCP allows project-wide SSH keys to be used on all VMs in the project, which would allow any GCP project IAM principal with appropriate permissions to SSH into the CVM.
+    \item \texttt{enable-guest-attributes = FALSE}: Disables the guest attributes feature, which is another channel through which the GCP control plane can communicate with the guest agent.
+    \item \texttt{enable-oslogin = FALSE}: Disables GCP OS Login, a service that maps GCP IAM identities to SSH access. If enabled, any user with the \texttt{roles/compute.osLogin} IAM role could SSH into the CVM without needing the ephemeral key.
+\end{itemize}
+
+\subsubsection{Layer 4: Guest Agent SSH Key Management Disablement}
+\label{sec:commissioning:guestagent}
+
+This layer addresses an attack vector that is \emph{not addressed} by existing work such as Duet~\cite{duet2024}. Inside every GCP VM, the \texttt{google-guest-agent} daemon periodically polls the metadata server at \texttt{http://169.254.169.254/computeMetadata/v1/} for SSH keys. When it finds new keys in the instance or project metadata, it appends them to \texttt{\~{}/.ssh/authorized\_keys}. This means that an attacker with GCP project IAM access (e.g., \texttt{compute.instances.setMetadata}) could inject an SSH key \emph{after} the VM has been launched, bypassing all previous protections.
+
+During the initial SSH session (Phase~C of Algorithm~\ref{alg:commissioning}), the controller executes a hardening script on the CVM that:
+
+\begin{enumerate}
+    \item Removes the \texttt{AuthorizedKeysCommand} directive from \texttt{/etc/ssh/sshd\_config} and all drop-in files in \texttt{/etc/ssh/sshd\_config.d/}, which the guest agent uses to inject keys via the \texttt{google\_authorized\_keys} helper binary.
+    \item Creates a configuration file at \texttt{/etc/google\_guest\_agent/instance\_configs.cfg} that explicitly disables the account management daemon:
+    \begin{verbatim}
+    [AccountManager]
+    disable = true
+    
+    [Daemons]
+    accounts_daemon = false
+    \end{verbatim}
+    \item Restarts the guest agent to apply the new configuration.
+\end{enumerate}
+
+\subsubsection{Layer 5: Filesystem Immutability}
+
+As a final defense-in-depth measure, the controller makes the \texttt{authorized\_keys} file immutable:
+
+\begin{verbatim}
+    chattr +i ~/.ssh/authorized_keys
+\end{verbatim}
+
+The \texttt{+i} (immutable) flag is an ext4 filesystem attribute that prevents \emph{any} modification to the file, even by the \texttt{root} user, until the flag is explicitly removed with \texttt{chattr -i}. This provides protection against:
+
+\begin{itemize}
+    \item Any residual guest agent activity that might attempt to append keys.
+    \item A compromised process within the CVM that attempts to modify SSH access.
+    \item Manual modification attempts if an adversary gained shell access through some other vector.
+\end{itemize}
+
+\noindent Additionally, an iptables rule is installed that filters outgoing connections to the metadata server (\texttt{169.254.169.254}) containing the string \texttt{ssh-keys}, providing network-level blocking of metadata SSH key retrieval as a further fallback.
+
+\subsection{Post-Commissioning CVM Lifecycle}
+\label{sec:commissioning:lifecycle}
+
+After commissioning, the CVM operates in one of two modes, controlled exclusively by the ASP through signed requests to the controller:
+
+\begin{itemize}
+    \item \textbf{In-update mode}: The controller can SSH into the CVM and execute commands on behalf of the ASP (e.g., deploying application code, installing packages). All commands and their outputs are recorded with SHA-256 hashes, forming a verifiable audit trail. This is the default mode immediately after commissioning.
+    \item \textbf{In-service mode}: The controller refuses to execute any further commands on the CVM. This mode is entered when the ASP signals that the CVM is ready to serve end users. Transitioning back to in-update mode is a privileged operation that would clear confidential data before allowing modifications.
+\end{itemize}
+
+Each response from the controller is signed with $sk_\mathcal{C}$, allowing the ASP to verify that the response was produced by the genuine SGX controller. The CVM can be identified across interactions by its unique identifier $\texttt{cvm\_id} = \textsf{H}(pk_{\text{ssh}})$.
+
+\subsection{Security Analysis}
+\label{sec:commissioning:security}
+
+\begin{theorem}[SSH Exclusivity]
+Assuming the integrity of SGX enclave memory protection, the SSH private key $sk_{\text{ssh}}$ is accessible only to the controller enclave $\mathcal{C}$, and no entity other than $\mathcal{C}$ can establish an SSH session to the CVM $\mathcal{V}$.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+By construction, $sk_{\text{ssh}}$ is generated within the SGX enclave (L1) and never leaves enclave-protected memory. The only copy of $pk_{\text{ssh}}$ injected into the CVM is placed in the \texttt{ssh-keys} metadata at creation time. After the CVM boots, the controller SSH-connects using $sk_{\text{ssh}}$ and executes the hardening script, which (a) disables all mechanisms by which the GCP guest agent could inject new keys (L4), (b) overwrites \texttt{authorized\_keys} to contain only $pk_{\text{ssh}}$ and marks it immutable (L5), and (c) relies on the firewall rule (L2) and metadata flags (L3) to block alternative access paths.
+
+For an adversary to SSH into $\mathcal{V}$, they would need to simultaneously:
+\begin{enumerate}
+    \item Obtain $sk_{\text{ssh}}$ from SGX-protected memory (violates SGX security model),
+    \item Or inject a new SSH key that gets accepted by the SSH daemon (blocked by L3, L4, L5), and
+    \item Bypass the firewall restriction from $\texttt{ip}_\mathcal{C}/32$ (blocked by L2).
+\end{enumerate}
+
+Since each layer is enforced independently, an adversary would need to defeat \emph{all} five layers simultaneously to gain SSH access, which provides robust defense in depth.
+\end{proof}

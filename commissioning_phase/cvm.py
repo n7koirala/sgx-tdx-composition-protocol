@@ -45,6 +45,11 @@ class ConfidentialVM:
         # Lifecycle mode: "in-update" allows commands, "in-service" blocks them
         self._mode = "in-update"
 
+        # IMA baseline from Phase C' verification
+        # Stores: {"ima_log": str, "pcr10": str, "ima_log_hash": str,
+        #          "tdx_quote": str, "entry_count": int, ...}
+        self._ima_baseline = None
+
     # ------------------------------------------------------------------
     # Properties / Getters / Setters
     # ------------------------------------------------------------------
@@ -68,6 +73,14 @@ class ConfidentialVM:
     def get_cvm_mode(self):
         return self._mode
 
+    def set_ima_baseline(self, baseline):
+        """Store the IMA commissioning baseline from Phase C'."""
+        self._ima_baseline = baseline
+
+    def get_ima_baseline(self):
+        """Return the IMA commissioning baseline."""
+        return self._ima_baseline
+
     def get_ip_address(self):
         return self._ip_address
 
@@ -82,6 +95,16 @@ class ConfidentialVM:
             state["command_outputs"] = self._command_outputs
         else:
             state["command_output_hashes"] = self._command_output_hashes
+
+        # Include IMA baseline summary (always compact)
+        if self._ima_baseline:
+            state["ima_verified"] = self._ima_baseline.get("success", False)
+            state["ima_entry_count"] = self._ima_baseline.get("entry_count", 0)
+            state["ima_pcr10"] = self._ima_baseline.get("pcr10", "")
+            state["ima_log_hash"] = self._ima_baseline.get("ima_log_hash", "")
+            if should_be_long and "manifest_violations" in self._ima_baseline:
+                state["ima_manifest_violations"] = self._ima_baseline["manifest_violations"]
+
         return state
 
     # ------------------------------------------------------------------

@@ -184,13 +184,31 @@ class GCPClient:
             automatic_restart=True,
         )
 
-        # --- Metadata: inject SSH public key ---
+        # --- Metadata: inject SSH public key + disable GCP SSH key management ---
+        # SECURITY: We inject only the controller's ephemeral public key and
+        # set metadata flags to block project-level SSH keys and disable
+        # guest attributes. This prevents IAM-based SSH key injection attacks.
         ssh_key_entry = f"{username}:{serialized_public_key}"
         metadata = compute_v1.Metadata(
             items=[
                 compute_v1.Items(
                     key="ssh-keys",
                     value=ssh_key_entry,
+                ),
+                # Block project-wide SSH keys from being injected
+                compute_v1.Items(
+                    key="block-project-ssh-keys",
+                    value="TRUE",
+                ),
+                # Disable guest attributes (SSH key management via metadata)
+                compute_v1.Items(
+                    key="enable-guest-attributes",
+                    value="FALSE",
+                ),
+                # Disable OS Login (another SSH key injection vector)
+                compute_v1.Items(
+                    key="enable-oslogin",
+                    value="FALSE",
                 ),
             ],
         )
