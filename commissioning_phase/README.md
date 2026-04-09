@@ -2,7 +2,7 @@
 
 This module implements the **commissioning (launch) phase** of the SGX-TDX composition protocol. An SGX enclave acts as a trustworthy controller that provisions and exclusively manages TDX Confidential VMs on Google Cloud Platform.
 
-Inspired by the [Duet paper](https://github.com/Nokia-Bell-Labs/tee-duet) (SysTEX 2024), adapted for Google Cloud + Intel TDX.
+Based on [Duet](https://github.com/Nokia-Bell-Labs/tee-duet) (SysTEX 2024), adapted for Google Cloud + Intel TDX.
 
 ## Architecture
 
