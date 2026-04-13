@@ -127,6 +127,80 @@ echo ""
 echo "--- GCP guest agent SSH hardening complete ---"
 
 # =====================================================================
+# STEP 2: Enable IMA Runtime Measurement Policy
+# =====================================================================
+# IMA maintains a kernel-level measurement log of every file executed,
+# mapped, or opened on the system. This log is used by the controller
+# during Phase C' to verify post-boot integrity.
+#
+# On GCP TDX CVMs, the kernel command line is controlled by the
+# hypervisor's direct kernel boot mechanism, so modifying GRUB has no
+# effect. Instead, we load the IMA policy at runtime by writing to
+# /sys/kernel/security/ima/policy. This file is write-once: all rules
+# must be written in a single operation before the policy locks.
+#
+# TRADEOFF: Files accessed before this point in the boot are not
+# measured by IMA. However, the first-boot integrity is covered by
+# TDX MRTD (static image measurement) and UEFI measured boot
+# (PCRs 0-9). IMA covers everything from this point onward.
+# =====================================================================
+echo ""
+echo "--- Enabling IMA runtime measurement policy ---"
+
+# 1. Ensure securityfs is mounted (required for IMA)
+if ! mountpoint -q /sys/kernel/security 2>/dev/null; then
+    sudo mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
+fi
+
+# 2. Check if IMA is available
+if [ -d "/sys/kernel/security/ima" ]; then
+    echo "✓ IMA is available at /sys/kernel/security/ima/"
+
+    # 3. Load the IMA measurement policy (all rules in a single write)
+    #    - BPRM_CHECK: measures all executed binaries
+    #    - MMAP_CHECK: measures all mmap'd libraries (e.g., shared .so files)
+    #    - MODULE_CHECK: measures all loaded kernel modules
+    if [ -f "/sys/kernel/security/ima/policy" ]; then
+        printf 'measure func=BPRM_CHECK\nmeasure func=MMAP_CHECK mask=MAY_EXEC\nmeasure func=MODULE_CHECK\n' \
+            | sudo tee /sys/kernel/security/ima/policy > /dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            echo "✓ IMA measurement policy loaded (BPRM_CHECK, MMAP_CHECK, MODULE_CHECK)"
+        else
+            echo "⚠ Failed to write IMA policy (may already be loaded or permission denied)"
+        fi
+    else
+        echo "⚠ IMA policy file not found — CONFIG_IMA_WRITE_POLICY may not be enabled"
+    fi
+
+    # 4. Verify IMA is now measuring
+    sleep 1
+    IMA_COUNT=$(sudo cat /sys/kernel/security/ima/ascii_runtime_measurements 2>/dev/null | wc -l)
+    echo "  IMA log entries after policy load: $IMA_COUNT"
+
+    if [ "$IMA_COUNT" -gt "1" ]; then
+        echo "✓ IMA is actively measuring files"
+    else
+        echo "⚠ IMA log has $IMA_COUNT entries — policy may not have loaded"
+    fi
+else
+    echo "⚠ IMA not found at /sys/kernel/security/ima/"
+    echo "  Kernel may not have CONFIG_IMA enabled"
+fi
+
+# 5. Check PCR-10 availability (vTPM)
+if [ -f "/sys/class/tpm/tpm0/pcr-sha1/10" ]; then
+    echo "✓ TPM PCR-10 (SHA-1) is available"
+    echo "  PCR-10 (SHA-1): $(cat /sys/class/tpm/tpm0/pcr-sha1/10)"
+elif [ -f "/sys/class/tpm/tpm0/pcr-sha256/10" ]; then
+    echo "✓ TPM PCR-10 (SHA-256) is available"
+else
+    echo "⚠ TPM PCR-10 not found — vTPM may not be configured"
+fi
+
+echo ""
+echo "--- IMA setup complete ---"
+
+# =====================================================================
 # STEP 2: System Update
 # =====================================================================
 echo ""
@@ -201,69 +275,70 @@ echo "  ✓ Password authentication disabled"
 echo "  ✓ Root login disabled"
 echo "  ✓ Metadata SSH key queries blocked"
 
-# =====================================================================
-# STEP 6: Ensure IMA (Integrity Measurement Architecture) is Active
-# =====================================================================
-# IMA maintains a kernel-level measurement log of every file executed,
-# mapped, or opened on the system. This log is used by the controller
-# during Phase C' to verify post-boot integrity.
-#
-# On Ubuntu 22.04 TDX images, IMA is typically enabled by default, but
-# the 'tcb' policy (which measures all executables, libraries, and
-# kernel modules) may not be active unless ima_policy=tcb is set as
-# a kernel boot parameter.
-# =====================================================================
-echo ""
-echo "--- Checking IMA status ---"
+# # =====================================================================
+# # STEP 6: Ensure IMA (Integrity Measurement Architecture) is Active
+# # =====================================================================
+# # IMA maintains a kernel-level measurement log of every file executed,
+# # mapped, or opened on the system. This log is used by the controller
+# # during Phase C' to verify post-boot integrity.
+# #
+# # On Ubuntu 22.04 TDX images, IMA is typically enabled by default, but
+# # the 'tcb' policy (which measures all executables, libraries, and
+# # kernel modules) may not be active unless ima_policy=tcb is set as
+# # a kernel boot parameter.
+# # =====================================================================
+# echo ""
+# echo "--- Checking IMA status ---"
 
-# 1. Ensure securityfs is mounted (required for IMA)
-if ! mountpoint -q /sys/kernel/security 2>/dev/null; then
-    sudo mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
-fi
+# # 1. Ensure securityfs is mounted (required for IMA)
+# if ! mountpoint -q /sys/kernel/security 2>/dev/null; then
+#     sudo mount -t securityfs securityfs /sys/kernel/security 2>/dev/null || true
+# fi
 
-# 2. Check if IMA is available
-if [ -d "/sys/kernel/security/ima" ]; then
-    echo "✓ IMA is available at /sys/kernel/security/ima/"
+# # 2. Check if IMA is available
+# if [ -d "/sys/kernel/security/ima" ]; then
+#     echo "✓ IMA is available at /sys/kernel/security/ima/"
 
-    # Check if IMA log has entries
-    IMA_COUNT=$(sudo wc -l < /sys/kernel/security/ima/ascii_runtime_measurements 2>/dev/null || echo "0")
-    echo "  IMA log entries: $IMA_COUNT"
+#     # Check if IMA log has entries
+#     IMA_COUNT=$(sudo wc -l < /sys/kernel/security/ima/ascii_runtime_measurements 2>/dev/null || echo "0")
+#     echo "  IMA log entries: $IMA_COUNT"
 
-    if [ "$IMA_COUNT" -gt "0" ]; then
-        echo "✓ IMA is actively measuring files"
-    else
-        echo "⚠ IMA log is empty — ima_policy=tcb may not be set"
-    fi
-else
-    echo "⚠ IMA not found at /sys/kernel/security/ima/"
-    echo "  IMA may need to be enabled via kernel parameter: ima_policy=tcb"
-fi
+#     if [ "$IMA_COUNT" -gt "0" ]; then
+#         echo "✓ IMA is actively measuring files"
+#     else
+#         echo "⚠ IMA log is empty — ima_policy=tcb may not be set"
+#     fi
+# else
+#     echo "⚠ IMA not found at /sys/kernel/security/ima/"
+#     echo "  IMA may need to be enabled via kernel parameter: ima_policy=tcb"
+# fi
 
-# 3. Check PCR-10 availability (vTPM)
-if [ -f "/sys/class/tpm/tpm0/pcr-sha1/10" ]; then
-    echo "✓ TPM PCR-10 (SHA-1) is available"
-    echo "  PCR-10 (SHA-1): $(cat /sys/class/tpm/tpm0/pcr-sha1/10)"
-elif [ -f "/sys/class/tpm/tpm0/pcr-sha256/10" ]; then
-    echo "✓ TPM PCR-10 (SHA-256) is available"
-else
-    echo "⚠ TPM PCR-10 not found — vTPM may not be configured"
-fi
+# # 3. Check PCR-10 availability (vTPM)
+# if [ -f "/sys/class/tpm/tpm0/pcr-sha1/10" ]; then
+#     echo "✓ TPM PCR-10 (SHA-1) is available"
+#     echo "  PCR-10 (SHA-1): $(cat /sys/class/tpm/tpm0/pcr-sha1/10)"
+# elif [ -f "/sys/class/tpm/tpm0/pcr-sha256/10" ]; then
+#     echo "✓ TPM PCR-10 (SHA-256) is available"
+# else
+#     echo "⚠ TPM PCR-10 not found — vTPM may not be configured"
+# fi
 
-# 4. Ensure ima_policy=tcb is set for future boots (if not already)
-#    This is a best-effort — the current boot already has its IMA policy
-if [ -f "/etc/default/grub" ]; then
-    if ! grep -q "ima_policy=tcb" /etc/default/grub; then
-        echo "  Adding ima_policy=tcb to GRUB for future boots..."
-        sudo sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 ima_policy=tcb ima_appraise=off"/' /etc/default/grub
-        sudo update-grub 2>/dev/null || true
-        echo "✓ GRUB updated with ima_policy=tcb (effective on next boot)"
-    else
-        echo "✓ ima_policy=tcb already set in GRUB"
-    fi
-fi
+# # 4. Ensure ima_policy=tcb is set for future boots (if not already)
+# #    This is a best-effort — the current boot already has its IMA policy
+# if [ -f "/etc/default/grub" ]; then
+#     if ! grep -q "ima_policy=tcb" /etc/default/grub; then
+#         echo "  Adding ima_policy=tcb to GRUB for future boots..."
+#         sudo sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 ima_policy=tcb ima_appraise=off"/' /etc/default/grub
+#         sudo update-grub 2>/dev/null || true
+#         echo "✓ GRUB updated with ima_policy=tcb (effective on next boot)"
+#     else
+#         echo "✓ ima_policy=tcb already set in GRUB"
+#     fi
+# fi
 
-echo ""
-echo "--- IMA status check complete ---"
+# echo ""
+# echo "--- IMA status check complete ---"
+
 echo ""
 echo "=== Full Setup Complete ==="
 echo "  ✓ SSH hardened (GCP guest agent disabled, keys immutable)"

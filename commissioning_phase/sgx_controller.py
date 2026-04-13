@@ -551,7 +551,14 @@ def handle_start_cvm():
     """Launch a new TDX CVM on GCP (privileged — requires ASP signature)."""
     request_data = request.get_json()
     global SGX_CONTROLLER
-    result, signature = SGX_CONTROLLER.start_cvm(request_data)
+    try:
+        result, signature = SGX_CONTROLLER.start_cvm(request_data)
+    except Exception as exc:
+        app.logger.error(f"start_cvm failed with exception: {exc}")
+        result = {"success": False, "error": f"Server error: {exc}"}
+        signature = SGX_CONTROLLER._sign_data(
+            bytes(json.dumps(result, sort_keys=True), "utf-8")
+        )
     response = {
         "result": result,
         "signature": bytes_to_base64_str(signature),

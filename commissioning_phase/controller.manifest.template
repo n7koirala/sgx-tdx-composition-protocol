@@ -1,0 +1,182 @@
+# Gramine Manifest Template for SGX Controller (Commissioning Phase)
+#
+# This manifest configures the SGX Controller Flask server to run inside an SGX enclave.
+# The controller provisions and manages TDX Confidential VMs on Google Cloud Platform.
+#
+# Security properties:
+# - Private SSH keys generated and stored inside enclave
+# - ASP signature verification enforced
+# - IMA-based launch integrity verification
+# - SGX remote attestation (DCAP or ITA)
+#
+# Compatible with Gramine 1.9+
+
+# ============================================================================
+# Gramine LibOS Configuration
+# ============================================================================
+
+# Entrypoint - Python interpreter
+libos.entrypoint = "{{ python_path }}"
+
+# Loader configuration
+loader.log_level = "{{ log_level }}"
+
+# Allow passing command line arguments (needed for -m commissioning_phase.sgx_controller -t sgx -p PORT)
+loader.insecure__use_cmdline_argv = true
+
+# Environment variables
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/{{ arch_libdir }}"
+loader.env.PATH = "/bin:/usr/bin"
+loader.env.HOME = "{{ home_dir }}"
+loader.env.PYTHONPATH = "{{ app_dir }}"
+
+# GCP Application Default Credentials path
+loader.env.GOOGLE_APPLICATION_CREDENTIALS = "{{ gcp_adc_path }}"
+
+# Controller IP (optional - for firewall rules, passed from host)
+loader.env.CONTROLLER_IP = { passthrough = true }
+
+# ============================================================================
+# Filesystem Mounts
+# ============================================================================
+
+fs.mounts = [
+    # Gramine runtime libraries
+    { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+
+    # System libraries
+    { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+    { path = "/usr/{{ arch_libdir }}", uri = "file:/usr/{{ arch_libdir }}" },
+    { path = "/usr/lib", uri = "file:/usr/lib" },
+
+    # Python installation
+    { path = "{{ python_path }}", uri = "file:{{ python_path }}" },
+    { path = "/usr/lib/python{{ python_version }}", uri = "file:/usr/lib/python{{ python_version }}" },
+    { path = "/usr/lib/python3/dist-packages", uri = "file:/usr/lib/python3/dist-packages" },
+    { path = "/usr/lib/python3", uri = "file:/usr/lib/python3" },
+    { path = "/usr/local/lib/python{{ python_version }}", uri = "file:/usr/local/lib/python{{ python_version }}" },
+
+    # System config files (networking, NSS, etc.)
+    { path = "/etc", uri = "file:/etc" },
+
+    # Application directory (parent of commissioning_phase)
+    { path = "{{ app_dir }}", uri = "file:{{ app_dir }}" },
+
+    # Sealed storage for controller private keys (regular filesystem)
+    { path = "{{ app_dir }}/commissioning_phase/sealed", uri = "file:{{ app_dir }}/commissioning_phase/sealed" },
+
+    # GCP Application Default Credentials (if using ADC)
+    { path = "{{ home_dir }}/.config/gcloud", uri = "file:{{ home_dir }}/.config/gcloud" },
+
+    # Temporary filesystem
+    { type = "tmpfs", path = "/tmp" },
+
+    # SSH client directory (for paramiko)
+    { type = "tmpfs", path = "{{ home_dir }}/.ssh" },
+]
+
+# ============================================================================
+# SGX-Specific Configuration
+# ============================================================================
+
+# Remote attestation method: "dcap" (local) or "none" (for ITA we use dcap quotes)
+# Both DCAP and ITA are supported - DCAP is used to generate quotes
+sgx.remote_attestation = "{{ attestation_method }}"
+
+# Debug mode (set to false in production for security)
+sgx.debug = {{ sgx_debug }}
+
+# Enclave size - Flask + GCP client + Paramiko needs substantial memory
+# Increased to 8G to accommodate all libraries and runtime state
+sgx.enclave_size = "8G"
+
+# Maximum number of threads (Flask threaded mode + SSH connections)
+sgx.max_threads = 64
+
+# ISV configuration (for attestation identity)
+sgx.isvprodid = 1
+sgx.isvsvn = 1
+
+# Allow eventfd for async IO (needed for network operations)
+sys.insecure__allow_eventfd = true
+
+# ============================================================================
+# Trusted Files - Files that are measured and included in MRENCLAVE
+# ============================================================================
+
+sgx.trusted_files = [
+    # Python interpreter
+    "file:{{ python_path }}",
+
+    # Gramine runtime
+    "file:{{ gramine.runtimedir() }}/",
+
+    # System libraries (critical for security - measured)
+    "file:{{ arch_libdir }}/",
+    "file:/usr/{{ arch_libdir }}/",
+
+    # Python standard library and installed packages
+    "file:/usr/lib/python{{ python_version }}/",
+    "file:/usr/lib/python3/dist-packages/",
+    "file:/usr/lib/python3/",
+    "file:/usr/local/lib/python{{ python_version }}/",
+
+    # Application code - entire commissioning_phase directory
+    "file:{{ app_dir }}/commissioning_phase/",
+
+    # SSL/TLS certificates (system CA bundle for HTTPS to GCP APIs)
+    "file:/etc/ssl/certs/",
+    "file:/usr/share/ca-certificates/",
+
+    # ASP public keys (for signature verification)
+    "file:{{ app_dir }}/commissioning_phase/asp_pub_keys/",
+]
+
+# ============================================================================
+# Allowed Files - Files that can be accessed but are NOT measured
+# ============================================================================
+
+sgx.allowed_files = [
+    # Network configuration files (can change without breaking attestation)
+    "file:/etc/nsswitch.conf",
+    "file:/etc/host.conf",
+    "file:/etc/resolv.conf",
+    "file:/etc/hosts",
+    "file:/etc/localtime",
+    "file:/etc/passwd",
+    "file:/etc/group",
+    "file:/etc/gai.conf",
+    "file:/etc/protocols",
+    "file:/etc/services",
+
+    # GCP configuration (environment-specific, not part of MRENCLAVE)
+    "file:{{ app_dir }}/commissioning_phase/gcp_config.env",
+
+    # GCP Application Default Credentials (user-specific)
+    "file:{{ home_dir }}/.config/gcloud/",
+
+    # GCP Service Account Key (if using key file authentication)
+    "file:{{ gcp_service_account_key }}",
+
+    # Sealed storage directory (private keys, mutable)
+    "file:{{ app_dir }}/commissioning_phase/sealed/",
+
+    # IMA reference manifest (can be updated without code changes)
+    "file:{{ app_dir }}/commissioning_phase/reference_manifest.json",
+
+    # Setup script copied to CVMs
+    "file:{{ app_dir }}/commissioning_phase/tdx_cvm_setup.sh",
+]
+
+# ============================================================================
+# System Settings
+# ============================================================================
+
+# Increase stack size for Python
+sys.stack.size = "2M"
+
+# Allow SIGTERM/SIGINT injection for graceful shutdown
+sys.enable_sigterm_injection = true
+
+# Enable extra runtime domain names configuration (for DNS)
+sys.enable_extra_runtime_domain_names_conf = true

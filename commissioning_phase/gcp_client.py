@@ -64,15 +64,56 @@ class GCPClient:
     # ------------------------------------------------------------------
 
     def _get_controller_ip(self):
-        """Get the external IP of this machine (the controller)."""
+        """Get the external IP of this machine (the controller).
+
+        Tries multiple methods in order:
+        1. Environment variable CONTROLLER_IP
+        2. GCP metadata service (if running on GCP)
+        3. HTTP request to api.ipify.org (works in SGX)
+        4. HTTPS request to api.ipify.org (may fail in SGX with SSL errors)
+        """
+        import os
+
+        # Method 1: Environment variable
+        controller_ip = os.getenv("CONTROLLER_IP")
+        if controller_ip:
+            self._logger.info(f"Controller IP from env: {controller_ip}")
+            return controller_ip
+
+        # Method 2: GCP metadata service (works if running on GCP instance)
+        try:
+            resp = requests.get(
+                "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip",
+                headers={"Metadata-Flavor": "Google"},
+                timeout=5
+            )
+            if resp.status_code == 200:
+                ip = resp.text.strip()
+                self._logger.info(f"Controller IP from GCP metadata: {ip}")
+                return ip
+        except Exception:
+            pass  # Not running on GCP or metadata service unavailable
+
+        # Method 3: HTTP request (works in SGX, no SSL verification needed)
+        try:
+            resp = requests.get("http://api.ipify.org", timeout=10)
+            ip = resp.text.strip()
+            self._logger.info(f"Controller IP from api.ipify.org (HTTP): {ip}")
+            return ip
+        except Exception as exc:
+            self._logger.warning(f"HTTP IP detection failed: {exc}")
+
+        # Method 4: HTTPS request (may fail in SGX with SSL errors)
         try:
             resp = requests.get("https://api.ipify.org", timeout=10)
             ip = resp.text.strip()
-            self._logger.info(f"Controller external IP: {ip}")
+            self._logger.info(f"Controller IP from api.ipify.org (HTTPS): {ip}")
             return ip
         except Exception as exc:
-            self._logger.warning(f"Could not determine controller IP: {exc}")
-            return None
+            self._logger.warning(f"HTTPS IP detection failed: {exc}")
+
+        self._logger.warning("Could not determine controller IP using any method")
+        return None
 
     def setup_firewall(self):
         """Create a firewall rule allowing SSH only from the controller's IP.
@@ -175,7 +216,7 @@ class GCPClient:
         # --- Confidential computing config (TDX) ---
         confidential_config = compute_v1.ConfidentialInstanceConfig(
             enable_confidential_compute=True,
-            confidential_instance_config_type="TDX",
+            confidential_instance_type="TDX",
         )
 
         # --- Scheduling (must be TERMINATE for CVM) ---

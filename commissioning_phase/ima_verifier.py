@@ -507,6 +507,25 @@ finally:
 
             # --- Success ---
             result["success"] = True
+            # Log detailed manifest summary at the end
+            if self._manifest and not skip_manifest:
+                matched_count = len(entries) - len([e for e in entries if e.file_path == "boot_aggregate" or not e.file_path])
+                violation_count = len(result.get("manifest_violations", []))
+                self._log("=" * 60)
+                self._log("Phase C': MANIFEST CHECK SUMMARY")
+                self._log(f"  Reference manifest entries : {len(self._manifest)}")
+                self._log(f"  IMA log entries checked    : {matched_count}")
+                self._log(f"  Matched                    : {matched_count - violation_count}")
+                self._log(f"  Violations                 : {violation_count}")
+                if violation_count > 0:
+                    self._log("  VIOLATIONS:")
+                    for v in result["manifest_violations"]:
+                        self._log(f"    ✗ {v['file_path']}")
+                        self._log(f"      {v['file_hash']}: {v['reason']}")
+                else:
+                    self._log("  ✓ All IMA entries match the reference manifest")
+                self._log("=" * 60)
+
             self._log(
                 f"Phase C': IMA verification PASSED "
                 f"({len(entries)} entries, PCR-10 OK"

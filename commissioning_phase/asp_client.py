@@ -124,6 +124,13 @@ class ASPClient:
         data = self._prepare_request(params, is_privileged)
         try:
             response = requests.post(url, json=data, timeout=600)
+            if response.status_code != 200 or "application/json" not in response.headers.get("content-type", ""):
+                print(f"[ERROR] Server returned HTTP {response.status_code}")
+                print(f"  Response body: {response.text[:500]}")
+                raise RuntimeError(
+                    f"Controller returned HTTP {response.status_code} "
+                    f"(expected 200 with JSON). Check the controller logs."
+                )
             return response.json(), response.status_code
         except requests.exceptions.RequestException as exc:
             print(f"Request failed: {exc}")
