@@ -22,6 +22,17 @@
 #   sudo bash setup_tdx_cvm.sh --check    # verify-only mode (no installs)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# for connecting to the TDX VM via SGX, need to create a firewall:
+# gcloud compute firewall-rules create allow-attestation-8443 \
+#     --direction=INGRESS \
+#     --priority=1000 \
+#     --network=default \
+#     --action=ALLOW \
+#     --rules=tcp:8443 \
+#     --source-ranges=129.74.154.215/32
+
+
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
