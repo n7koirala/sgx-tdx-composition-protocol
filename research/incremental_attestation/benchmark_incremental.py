@@ -389,11 +389,20 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
                           f"entries={res['ima_entries_received']:,}, "
                           f"{res['ima_data_kb']:.0f}KB")
 
+                    # For optimized mode: update offset AFTER EACH repeat
+                    # so the next repeat's fd reset goes to the right position.
+                    # Without this, rep 2 reads 2×Δn and rep 3 reads 3×Δn
+                    # because the fd resets to the original N every time.
+                    if read_mode == "optimized":
+                        if res['ima_total_count'] > current_offset:
+                            current_offset = res['ima_total_count']
+
                 except Exception as e:
                     print(f"    Rep {rep}/{repeats}: ✗ Error: {e}")
 
             if round_results:
-                # Update offset after successful rounds
+                # For non-optimized: update offset after all rounds
+                # (fd reopens each time, so offset doesn't affect reads)
                 last = round_results[-1]
                 if last['ima_total_count'] > current_offset:
                     current_offset = last['ima_total_count']
