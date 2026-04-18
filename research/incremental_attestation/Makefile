@@ -226,6 +226,5 @@ print(f'  Merged {len(all_rows)} rows → results_all.csv')"
 
 .PHONY: clean
 clean:
-	rm -f $(OUTPUT_DIR)/results_*.csv
-	rm -f $(OUTPUT_DIR)/chart_*.png
-	@echo "Cleaned results and charts."
+	rm -f $(OUTPUT_DIR)/results_optimized_sgx.csv
+	@echo "Cleaned results."
