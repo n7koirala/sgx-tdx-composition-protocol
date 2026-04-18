@@ -289,6 +289,15 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
     """
     all_results = []
 
+    # For optimized mode, force repeats=1 to avoid accumulating extra IMA
+    # entries (each repeat generates Δn new entries, which can push the
+    # total past the next baseline target). Non-optimized reopens the fd
+    # each time and doesn't generate new entries, so repeats are fine.
+    if read_mode == "optimized" and repeats > 1:
+        print(f"\n  ⚠ Optimized mode: forcing repeats=1 (each repeat generates")
+        print(f"    new IMA entries that would exceed subsequent baselines)")
+        repeats = 1
+
     print(f"\n{'═' * 80}")
     print(f"  MODE: {mode_label}")
     print(f"  Read Mode: {read_mode}")
