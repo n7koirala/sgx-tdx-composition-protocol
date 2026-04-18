@@ -662,6 +662,9 @@
     "sha256:656354b09f8d2e81460fc233352b44ae7200347c681a843557b629d191a15e49": [
       "/usr/bin/kmod"
     ],
+    "sha256:659c54abcb4041a7abed5800b5db8935ae36325e1d1b61bd635cf711ecc4e969": [
+      "/usr/bin/sleep"
+    ],
     "sha256:65f47a3dc2cec5f938379b7b625f0621657bf1254551895d22462c6a204cbad8": [
       "/usr/lib/x86_64-linux-gnu/liblz4.so.1.9.3"
     ],
@@ -1114,6 +1117,9 @@
     "sha256:a25f89553aba99963282fef599f1baa385d147405e3e90bc4a13ef87c6de4f53": [
       "/usr/lib/x86_64-linux-gnu/perl/5.34.0/auto/I18N/Langinfo/Langinfo.so"
     ],
+    "sha256:a298f995dee77f9744f0a772316c97d929dd2b4b8de45964f10271697f4fd385": [
+      "/usr/lib/x86_64-linux-gnu/libpolkit-gobject-1.so.0.0.0"
+    ],
     "sha256:a37a2aff9e524ce0c68971f51e05d9427a8b3a3e2d04b69a6982553aab44bfbd": [
       "/usr/bin/install-info"
     ],
@@ -1261,6 +1267,9 @@
     ],
     "sha256:b9ff9f1ee57c28b2ad7cf8244133e234d59de8014d81e049f0512af440084fe7": [
       "/usr/lib/systemd/system-generators/systemd-getty-generator"
+    ],
+    "sha256:ba6f3dc5b24b1e55a3a27f0cc59eb4a6b32c344f977e0d623486d70f9e66da8e": [
+      "/usr/bin/wc"
     ],
     "sha256:ba7aa6fa42ccdeb2503a9996de2abd3fdbdbd723a12d8f3faf7d6df3ed458143": [
       "/usr/lib/systemd/system-generators/snapd-generator"
@@ -1738,6 +1747,33 @@
     ],
     "sha256:ffc30864da514025c073a29d5afc6705ff8bbe4ecfdbc7917dd674e37b7b1b8a": [
       "/usr/sbin/cron"
+    ],
+    "sha256:373d07adb9c5333af63d565668e68f56f8138361d3f17cd989dce5dff92349b2": [
+      "/var/lib/dpkg/info/snapd.postrm"
+    ],
+    "sha256:2afd1768906604cf2abd3d755757fba09b51bfb16cd33e85152e063a0d617c09": [
+      "/var/lib/dpkg/info/snapd.postinst"
+    ],
+    "sha256:c3a253711ac85f40b5dba57515796ec7b68b1c97268aef1e911b8f543a0f3f12": [
+      "/usr/bin/snap"
+    ],
+    "sha256:7a63ca99c391f3318e2cf33c3bd600647bf78730d9b3a93207f92cfafc8f0299": [
+      "/usr/lib/systemd/system-environment-generators/snapd-env-generator"
+    ],
+    "sha256:ed041af6acde800981a18edc2e8764ac8593e3471555395335a8ccd8cf4b05be": [
+      "/usr/lib/systemd/system-generators/snapd-generator"
+    ],
+    "sha256:911a767d6f705ecc6984b2544d9b84fd6d7a4e307dc741ba65e8232d36a5d8a3": [
+      "/usr/lib/snapd/snapd"
+    ],
+    "sha256:597ffc43baad8c5c6791d5f823589740fa3ec1ad5a7d0ca51aee86e05a799bb9": [
+      "/usr/lib/snapd/snap-seccomp"
+    ],
+    "sha256:c7f01910f51cfdaa33ba6174ea791bf20b3b5b6ef771a236522092f113e72032": [
+      "/usr/lib/snapd/snap-update-ns"
+    ],
+    "sha256:a7d9de56daf5167942269e6be3f53ca65180600a7933fd33cca9e9c2315573ab": [
+      "/usr/lib/snapd/snapd-apparmor"
     ]
   },
   "image": "ubuntu-2204-lts",

@@ -68,6 +68,26 @@ from common.protocol import (
 )
 
 
+# ─── Gramine Enclave Startup Time ────────────────────────────────────────────
+# Record the time at module load. In SGX mode, Gramine loads and measures
+# all trusted files before Python starts, so the wall-clock difference
+# between process start and this point represents enclave startup overhead.
+
+_PROCESS_START_NS = time.time_ns()
+_MODULE_LOAD_TIME = time.perf_counter()
+
+try:
+    # On Linux, read process start time from /proc for accurate measurement
+    with open('/proc/self/stat', 'r') as f:
+        fields = f.read().split()
+        # Field 22 is starttime in clock ticks
+        _starttime_ticks = int(fields[21])
+        _clk_tck = os.sysconf('SC_CLK_TCK')
+        # This gives us the relative starttime; we'll measure wall-clock instead
+except Exception:
+    pass
+
+
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 DEFAULT_BASELINES = [10000, 50000, 100000, 200000]
@@ -185,6 +205,65 @@ def run_attestation_round(tdx_host, tdx_port, verify_cert, ca_cert,
     return result
 
 
+def send_control_request(tdx_host, tdx_port, verify_cert, ca_cert,
+                         request_type, **kwargs):
+    """
+    Send a control request to the CVM agent (e.g., generate delta, reset fd).
+
+    Args:
+        tdx_host: CVM agent hostname/IP
+        tdx_port: CVM agent port
+        verify_cert: Whether to verify TLS cert
+        ca_cert: CA certificate path
+        request_type: "generate_delta" or "reset_fd"
+        **kwargs: Additional fields for the control request
+
+    Returns:
+        dict with the agent's response
+    """
+    tls_context = create_tls_context_client(
+        ca_cert_file=ca_cert, verify=verify_cert
+    )
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(300)  # Delta generation can take a while
+    tls_sock = tls_context.wrap_socket(sock, server_hostname=tdx_host)
+    tls_sock.connect((tdx_host, tdx_port))
+
+    try:
+        req = {"request_type": "control", "action": request_type}
+        req.update(kwargs)
+        data = json.dumps(req).encode('utf-8') + MESSAGE_DELIMITER
+        tls_sock.sendall(data)
+
+        response_json = receive_message(tls_sock)
+        return json.loads(response_json)
+    finally:
+        tls_sock.close()
+
+
+def request_delta_generation(tdx_host, tdx_port, verify_cert, ca_cert, count):
+    """
+    Ask the CVM agent to generate `count` new IMA entries.
+    This creates fresh delta entries for proper benchmark repetition.
+    """
+    return send_control_request(
+        tdx_host, tdx_port, verify_cert, ca_cert,
+        request_type="generate_delta", count=count
+    )
+
+
+def request_fd_reset(tdx_host, tdx_port, verify_cert, ca_cert, target_offset):
+    """
+    Ask the CVM agent to close its persistent IMA fd and reopen it
+    at the target offset. This is NOT timed as part of the attestation
+    measurement — it's setup for the next repeat.
+    """
+    return send_control_request(
+        tdx_host, tdx_port, verify_cert, ca_cert,
+        request_type="reset_fd", target_offset=target_offset
+    )
+
+
 # ─── Benchmark Runner ────────────────────────────────────────────────────────
 
 def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
@@ -252,7 +331,7 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
         for dn in deltas:
             print(f"\n  ── Δn = {dn:,} (N={N:,}) ──")
 
-            # Prompt user to generate delta entries
+            # Generate initial delta entries (manual step)
             print(f"\n  >>> Generate {dn:,} new entries on CVM:")
             print(f"  >>> sudo python3 generate_ima_baseline.py --delta {dn}")
             input(f"  >>> Press Enter when done... ")
@@ -261,6 +340,29 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
             round_results = []
             for rep in range(1, repeats + 1):
                 try:
+                    # ── For optimized mode, repeats 2+ need fresh state ──
+                    if read_mode == "optimized" and rep > 1:
+                        print(f"    [Setup] Generating {dn:,} fresh delta entries "
+                              f"for repeat {rep}...")
+                        gen_result = request_delta_generation(
+                            tdx_host, tdx_port, verify_cert, ca_cert, dn
+                        )
+                        gen_actual = gen_result.get('generated', 0)
+                        gen_total = gen_result.get('total_ima_count', 0)
+                        print(f"    [Setup] Generated {gen_actual:,} entries "
+                              f"(total={gen_total:,}, "
+                              f"{gen_result.get('elapsed_ms', 0):.0f}ms)")
+
+                        # Reset the agent's persistent fd to the current
+                        # offset so the next read picks up ONLY the new
+                        # delta entries (not the ones from previous repeats)
+                        reset_result = request_fd_reset(
+                            tdx_host, tdx_port, verify_cert, ca_cert,
+                            target_offset=current_offset
+                        )
+                        print(f"    [Setup] Fd reset to {reset_result.get('fd_position', 0):,} "
+                              f"({reset_result.get('elapsed_ms', 0):.1f}ms)")
+
                     res = run_attestation_round(
                         tdx_host, tdx_port, verify_cert, ca_cert,
                         ima_offset=current_offset,
@@ -529,11 +631,14 @@ def main():
     # Check if running inside SGX enclave
     in_enclave = os.path.exists("/dev/attestation")
     if in_enclave:
+        enclave_startup_ms = round((_MODULE_LOAD_TIME) * 1000, 1)  # Time from process start
         print(f"  Environment: SGX Enclave (Gramine)")
+        print(f"  Enclave load: ~{enclave_startup_ms:.0f}ms (Python module init)")
         # Override mode label if inside enclave
         modes = ["Optimized (SGX)"]
         read_modes = ["optimized"]
     else:
+        enclave_startup_ms = 0
         print(f"  Environment: Python (no SGX)")
 
     all_results = []
@@ -566,7 +671,21 @@ def main():
             os.path.dirname(os.path.abspath(__file__)),
             f"results_{args.mode}.csv"
         )
-    write_csv(all_results, output_path)
+
+    # Inside SGX enclave, /benchmark is read-only (trusted_files).
+    # Write to /tmp first, then print instructions to copy out.
+    if in_enclave and output_path.startswith('/benchmark'):
+        tmp_output = '/tmp/' + os.path.basename(output_path)
+        write_csv(all_results, tmp_output)
+        print(f"\n  ⚠ Inside enclave: results written to {tmp_output}")
+        print(f"  Copy from host: the file is at the tmpfs mount.")
+        # Also try writing to the allowed_files path
+        try:
+            write_csv(all_results, output_path)
+        except PermissionError:
+            print(f"  (Could not write to {output_path} - use allowed_files mount)")
+    else:
+        write_csv(all_results, output_path)
 
     print(f"\n{'═' * 80}")
     print(f"  Benchmark complete. {len(all_results)} data points collected.")

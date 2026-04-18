@@ -163,8 +163,10 @@ bench-optimized-sgx:
 	@echo "NOTE: This requires the Gramine manifest to be built."
 	@echo "      Run 'make -C $(SGX_VERIFIER_DIR) all' first if needed."
 	@echo ""
+	@echo "Timing includes Gramine enclave startup overhead."
+	@echo ""
 	cd $(SGX_VERIFIER_DIR) && \
-	gramine-sgx ./verifier $(abspath benchmark_incremental.py) \
+	time gramine-sgx ./verifier /benchmark/benchmark_incremental.py \
 		--tdx-host $(TDX_HOST) \
 		--tdx-port $(TDX_PORT) \
 		--method $(METHOD) \
@@ -173,7 +175,7 @@ bench-optimized-sgx:
 		--baselines $(BASELINES) \
 		--deltas $(DELTAS) \
 		--repeats $(REPEATS) \
-		--output $(OUTPUT_DIR)/results_optimized_sgx.csv
+		--output /benchmark/results_optimized_sgx.csv
 
 bench-all: bench-non-optimized bench-optimized-python bench-optimized-sgx
 	@echo ""

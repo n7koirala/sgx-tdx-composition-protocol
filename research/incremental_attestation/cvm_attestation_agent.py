@@ -27,6 +27,7 @@ import sys
 import os
 import socket
 import ssl
+import stat
 import argparse
 import subprocess
 import json
@@ -279,6 +280,88 @@ class CVMAttestationAgent:
             print(f"    [IMA] Error: {e}")
             return "", 0, (t1 - t0) * 1000
 
+    # ─── IMA Delta Generation (for benchmark repeats) ─────────────────────
+
+    def generate_ima_delta(self, count: int) -> dict:
+        """
+        Generate `count` new IMA entries by creating and executing unique
+        shell scripts. Used by the benchmark to produce fresh delta entries
+        between repeated attestation rounds.
+
+        Returns:
+            dict with generated count, total IMA count, and elapsed time
+        """
+        import tempfile
+
+        tmp_dir = "/tmp/ima_bench_delta"
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        before = self.read_ima_count()
+        t0 = time.perf_counter()
+        created = []
+
+        for i in range(count):
+            fname = os.path.join(tmp_dir, f"delta_{time.time_ns()}_{i}.sh")
+            content = f"#!/bin/bash\n# delta idx={i} t={time.time_ns()}\necho ok\n"
+            with open(fname, 'w') as f:
+                f.write(content)
+            os.chmod(fname, 0o755)
+            subprocess.run([fname], capture_output=True)
+            created.append(fname)
+
+        t1 = time.perf_counter()
+
+        # Clean up temp files
+        for p in created:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+        time.sleep(0.3)  # Allow IMA to finish processing
+        after = self.read_ima_count()
+
+        return {
+            "status": "ok",
+            "requested": count,
+            "generated": after - before,
+            "total_ima_count": after,
+            "elapsed_ms": round((t1 - t0) * 1000, 1),
+        }
+
+    def reset_ima_fd(self, target_offset: int = 0) -> dict:
+        """
+        Close the persistent IMA fd and optionally re-open it at a target
+        offset. This resets the agent's state so the next optimized read
+        starts from the correct position — needed for benchmark repeats.
+
+        Args:
+            target_offset: Position to seek to after reopening (0 = don't reopen)
+
+        Returns:
+            dict with status and timing info
+        """
+        t0 = time.perf_counter()
+
+        if self._ima_fd and not self._ima_fd.closed:
+            self._ima_fd.close()
+        self._ima_fd = None
+        self._ima_lines_read = 0
+
+        if target_offset > 0:
+            self._ima_fd = open(self.IMA_LOG_PATH, 'r')
+            for _ in range(target_offset):
+                if not self._ima_fd.readline():
+                    break
+            self._ima_lines_read = target_offset
+
+        t1 = time.perf_counter()
+        return {
+            "status": "ok",
+            "fd_position": self._ima_lines_read,
+            "elapsed_ms": round((t1 - t0) * 1000, 1),
+        }
+
     # ─── TDX Quote Generation ────────────────────────────────────────────
 
     def get_tdx_quote_dcap(self, nonce: str) -> tuple:
@@ -350,15 +433,51 @@ class CVMAttestationAgent:
 
     # ─── Request Handling ────────────────────────────────────────────────
 
+    def handle_control_request(self, req_dict: dict) -> str:
+        """
+        Handle a control request (non-attestation operation).
+
+        Supported actions:
+          - generate_delta: Generate N new IMA entries
+          - reset_fd: Close and reopen persistent IMA fd at target offset
+        """
+        action = req_dict.get("action", "")
+
+        if action == "generate_delta":
+            count = int(req_dict.get("count", 0))
+            print(f"    [CTRL] Generating {count:,} IMA delta entries...")
+            result = self.generate_ima_delta(count)
+            print(f"    [CTRL] Generated {result['generated']:,} entries "
+                  f"(total={result['total_ima_count']:,}, "
+                  f"{result['elapsed_ms']:.0f}ms)")
+            return json.dumps(result)
+
+        elif action == "reset_fd":
+            target = int(req_dict.get("target_offset", 0))
+            print(f"    [CTRL] Resetting IMA fd to offset {target:,}...")
+            result = self.reset_ima_fd(target_offset=target)
+            print(f"    [CTRL] Fd reset to position {result['fd_position']:,} "
+                  f"({result['elapsed_ms']:.1f}ms)")
+            return json.dumps(result)
+
+        else:
+            return json.dumps({"status": "error", "error": f"Unknown control action: {action}"})
+
     def handle_request(self, request_json: str) -> str:
         """
-        Handle an attestation request.
+        Handle an attestation or control request.
 
         The request may include:
           - ima_offset: number of entries subscriber already has
           - read_mode: "non_optimized" or "optimized" (default: optimized)
+          - request_type: "control" for non-attestation operations
         """
         try:
+            # Check for control requests first
+            req_dict = json.loads(request_json)
+            if req_dict.get("request_type") == "control":
+                return self.handle_control_request(req_dict)
+
             request = AttestationRequest.from_json(request_json)
             valid, error = request.validate()
             if not valid:
