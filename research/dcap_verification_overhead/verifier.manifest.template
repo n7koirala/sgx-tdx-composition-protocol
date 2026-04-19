@@ -1,0 +1,90 @@
+# Gramine Manifest — DCAP Verification Overhead microbenchmark.
+#
+# Loads Python into an SGX enclave with enough of the host filesystem
+# to import cryptography, the project common/ and tdx-dcap-attestation/
+# modules, and to read the pre-captured quote + collateral from
+# `inputs/`.
+#
+# Built from the Makefile target `all`.
+
+libos.entrypoint = "{{ python_path }}"
+
+loader.log_level  = "{{ log_level }}"
+loader.insecure__use_cmdline_argv = true
+
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/{{ arch_libdir }}"
+loader.env.PATH        = "/bin:/usr/bin"
+loader.env.HOME        = "/home/user"
+loader.env.PYTHONPATH  = "/bench:/research/sgx-tdx-attestation:/research/tdx-dcap-attestation"
+loader.env.PYTHONDONTWRITEBYTECODE = "1"
+
+fs.mounts = [
+    { path = "/lib",                                uri = "file:{{ gramine.runtimedir() }}" },
+    { path = "{{ arch_libdir }}",                   uri = "file:{{ arch_libdir }}" },
+    { path = "/usr/{{ arch_libdir }}",              uri = "file:/usr/{{ arch_libdir }}" },
+    { path = "/usr/lib",                            uri = "file:/usr/lib" },
+
+    { path = "{{ python_path }}",                   uri = "file:{{ python_path }}" },
+    { path = "/usr/lib/python{{ python_version }}", uri = "file:/usr/lib/python{{ python_version }}" },
+    { path = "/usr/lib/python3/dist-packages",      uri = "file:/usr/lib/python3/dist-packages" },
+    { path = "/usr/lib/python3",                    uri = "file:/usr/lib/python3" },
+
+    { path = "/etc",                                uri = "file:/etc" },
+
+    # Benchmark code + inputs
+    { path = "/bench",                              uri = "file:{{ bench_dir }}" },
+
+    # Project modules the benchmark imports
+    { path = "/research",                           uri = "file:{{ research_dir }}" },
+
+    { type = "tmpfs", path = "/tmp" },
+]
+
+# SGX
+sgx.remote_attestation = "dcap"
+sgx.debug              = true
+sgx.enclave_size       = "2G"
+sgx.max_threads        = 16
+sgx.isvprodid          = 1
+sgx.isvsvn             = 0
+sys.insecure__allow_eventfd = true
+sys.stack.size              = "4M"
+sys.enable_sigterm_injection = true
+sys.enable_extra_runtime_domain_names_conf = true
+
+sgx.trusted_files = [
+    "file:{{ python_path }}",
+    "file:{{ gramine.runtimedir() }}/",
+    "file:{{ arch_libdir }}/",
+    "file:/usr/{{ arch_libdir }}/",
+    "file:/usr/lib/python{{ python_version }}/",
+    "file:/usr/lib/python3/dist-packages/",
+    "file:/usr/lib/python3/",
+
+    "file:{{ bench_dir }}/benchmark.py",
+
+    "file:{{ research_dir }}/sgx-tdx-attestation/common/",
+    "file:{{ research_dir }}/tdx-dcap-attestation/",
+
+    "file:/etc/ssl/certs/",
+    "file:/usr/share/ca-certificates/",
+]
+
+sgx.allowed_files = [
+    "file:/etc/nsswitch.conf",
+    "file:/etc/host.conf",
+    "file:/etc/resolv.conf",
+    "file:/etc/hosts",
+    "file:/etc/localtime",
+    "file:/etc/passwd",
+    "file:/etc/group",
+    "file:/etc/gai.conf",
+
+    # Inputs (quote, nonce, pickled collateral) — NOT measured, so you
+    # can swap in different sample quotes without rebuilding MRENCLAVE.
+    "file:{{ bench_dir }}/inputs/",
+
+    # Results CSV written from inside the enclave.
+    "file:{{ bench_dir }}/results_sgx.csv",
+    "file:{{ bench_dir }}/results_sgx_summary.json",
+]
