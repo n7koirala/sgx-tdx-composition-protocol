@@ -79,7 +79,10 @@ class CVMAttestationAgent:
         # IMA paths
         self.IMA_LOG_PATH = "/sys/kernel/security/ima/ascii_runtime_measurements"
         self.IMA_COUNT_PATH = "/sys/kernel/security/ima/runtime_measurements_count"
-        self.PCR10_PATH = "/sys/class/tpm/tpm0/pcr-sha256/10"
+        # PCR10 SHA-1 bank: matches the SHA-1 template hashes in the ASCII
+        # IMA log so the subscriber can replay the extend chain directly
+        # from parts[1] without per-entry template_data reconstruction.
+        self.PCR10_PATH = "/sys/class/tpm/tpm0/pcr-sha1/10"
 
         # Persistent IMA fd for optimized mode
         self._ima_fd = None
@@ -673,7 +676,7 @@ def self_test():
     print("\n[2] Checking IMA paths...")
     ima_log = "/sys/kernel/security/ima/ascii_runtime_measurements"
     ima_count = "/sys/kernel/security/ima/runtime_measurements_count"
-    pcr10 = "/sys/class/tpm/tpm0/pcr-sha256/10"
+    pcr10 = "/sys/class/tpm/tpm0/pcr-sha1/10"
 
     for path, label in [(ima_log, "IMA log"), (ima_count, "IMA count"), (pcr10, "PCR 10")]:
         if os.path.exists(path):

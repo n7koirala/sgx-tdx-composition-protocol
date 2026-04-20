@@ -56,16 +56,20 @@ import statistics
 import sys
 import time
 
-# Add parent directory for common module
+# Add parent directory for common module, and own directory for ima_pcr_verify
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..', 'sgx-tdx-attestation'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from common.protocol import (
     AttestationRequest, AttestationResponse,
-    generate_nonce, verify_dcap_quote, verify_ima_log,
+    generate_nonce, verify_dcap_quote,
     create_tls_context_client, send_message, receive_message,
     DEFAULT_PORT, METHOD_DCAP, MESSAGE_DELIMITER
 )
+
+# Merged IMA integrity check + PCR-10 SHA-1 extend-chain replay.
+from ima_pcr_verify import verify_ima_log_with_replay, ZERO_PCR_SHA1
 
 
 # ─── Gramine Enclave Startup Time ────────────────────────────────────────────
@@ -99,7 +103,8 @@ DEFAULT_REPEATS = 3
 
 def run_attestation_round(tdx_host, tdx_port, verify_cert, ca_cert,
                           ima_offset=0, read_mode="optimized",
-                          method=METHOD_DCAP, verbose=False):
+                          method=METHOD_DCAP, verbose=False,
+                          prev_pcr_state=ZERO_PCR_SHA1):
     """
     Run a single attestation round against the CVM agent.
 
@@ -111,9 +116,13 @@ def run_attestation_round(tdx_host, tdx_port, verify_cert, ca_cert,
         ima_offset: Number of IMA entries already verified
         read_mode: "non_optimized" or "optimized"
         method: Attestation method (dcap or ita)
+        prev_pcr_state: 20-byte SHA-1 PCR-10 state carried from the prior
+                        round (ZERO_PCR_SHA1 for the first/baseline round).
 
     Returns:
-        dict with detailed per-phase timing
+        dict with detailed per-phase timing plus:
+          - 'new_pcr_state': 20-byte bytes to thread into the next round
+          - 'pcr_match': bool
     """
     result = {}
     t_total_start = time.perf_counter()
@@ -173,20 +182,32 @@ def run_attestation_round(tdx_host, tdx_port, verify_cert, ca_cert,
             result['boot_verdict'] = 'N/A'
         result['t_quote_verify_ms'] = round((time.perf_counter() - t0) * 1000, 3)
 
-        # IMA verification
+        # IMA verification + PCR-10 extend-chain replay (merged single pass).
         t0 = time.perf_counter()
         ima_entries = 0
         ima_data_bytes = 0
         runtime_verdict = 'IMA_UNAVAILABLE'
+        new_pcr_state = prev_pcr_state
+        pcr_match = False
 
         if response.ima_log and response.pcr10:
             ima_log_text = base64.b64decode(response.ima_log).decode('utf-8')
             ima_data_bytes = len(response.ima_log)
-            ima_valid, ima_count, ima_msg = verify_ima_log(
-                ima_log_text, response.pcr10, debug=False
+            vr = verify_ima_log_with_replay(
+                ima_log_text, response.pcr10,
+                prev_pcr_state=prev_pcr_state, debug=False,
             )
-            ima_entries = ima_count
-            runtime_verdict = 'CLEAN' if ima_valid else 'VIOLATION'
+            ima_entries = vr.entry_count
+            new_pcr_state = vr.new_pcr_state
+            pcr_match = vr.pcr_match
+            if vr.ok:
+                runtime_verdict = 'CLEAN'
+            elif vr.tampered > 0:
+                runtime_verdict = 'VIOLATION'
+            elif not vr.pcr_match:
+                runtime_verdict = 'PCR_MISMATCH'
+            else:
+                runtime_verdict = 'VIOLATION'
         elif response.ima_entry_count > 0 and not response.ima_log:
             ima_entries = 0
             runtime_verdict = 'CLEAN_NO_DELTA'
@@ -197,6 +218,8 @@ def run_attestation_round(tdx_host, tdx_port, verify_cert, ca_cert,
         result['ima_total_count'] = response.ima_entry_count
         result['ima_data_kb'] = round(ima_data_bytes / 1024, 1)
         result['runtime_verdict'] = runtime_verdict
+        result['pcr_match'] = pcr_match
+        result['new_pcr_state'] = new_pcr_state
 
     finally:
         tls_sock.close()
@@ -311,6 +334,11 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
         print(f"  BASELINE N = {N:,}")
         print(f"{'─' * 80}")
 
+        # Fresh PCR-10 replay state per baseline N.  The baseline
+        # attestation replays the full N-entry log starting from zero;
+        # subsequent delta rounds extend that state incrementally.
+        pcr_state = ZERO_PCR_SHA1
+
         # Prompt user to ensure CVM has N entries
         print(f"\n  >>> Ensure CVM IMA log has {N:,} entries.")
         print(f"  >>> On CVM: sudo python3 generate_ima_baseline.py --target {N}")
@@ -322,12 +350,15 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
             baseline_result = run_attestation_round(
                 tdx_host, tdx_port, verify_cert, ca_cert,
                 ima_offset=0, read_mode="optimized",
-                method=method, verbose=verbose
+                method=method, verbose=verbose,
+                prev_pcr_state=pcr_state,
             )
             verified_count = baseline_result['ima_total_count']
+            pcr_state = baseline_result['new_pcr_state']
             print(f"  ✓ Baseline: {verified_count:,} entries, "
                   f"{baseline_result['t_total_ms']:.0f}ms total, "
-                  f"{baseline_result['ima_data_kb']:.0f} KB")
+                  f"{baseline_result['ima_data_kb']:.0f} KB, "
+                  f"pcr_match={baseline_result['pcr_match']}")
         except Exception as e:
             print(f"  ✗ Baseline attestation failed: {e}")
             print(f"  Skipping this baseline N={N:,}")
@@ -377,7 +408,8 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
                         ima_offset=current_offset,
                         read_mode=read_mode,
                         method=method,
-                        verbose=verbose
+                        verbose=verbose,
+                        prev_pcr_state=pcr_state,
                     )
 
                     res['baseline_N'] = N
@@ -386,6 +418,11 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
                     res['read_mode'] = read_mode
                     res['repeat'] = rep
                     res['ima_offset_sent'] = current_offset
+
+                    # Thread the PCR state forward for the next round, then
+                    # drop the raw bytes from the serialised result.
+                    pcr_state = res['new_pcr_state']
+                    res.pop('new_pcr_state', None)
 
                     round_results.append(res)
 
@@ -396,7 +433,8 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
                           f"response={res['t_response_ms']:.0f}ms, "
                           f"ima_verify={res['t_ima_verify_ms']:.1f}ms, "
                           f"entries={res['ima_entries_received']:,}, "
-                          f"{res['ima_data_kb']:.0f}KB")
+                          f"{res['ima_data_kb']:.0f}KB, "
+                          f"pcr={'OK' if res['pcr_match'] else 'MISMATCH'}")
 
                     # For optimized mode: update offset AFTER EACH repeat
                     # so the next repeat's fd reset goes to the right position.

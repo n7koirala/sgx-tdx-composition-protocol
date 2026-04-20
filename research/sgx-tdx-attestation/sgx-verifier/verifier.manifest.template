@@ -47,6 +47,9 @@ fs.mounts = [
     # Application directory (parent of sgx-verifier, includes common module)
     { path = "/app", uri = "file:{{ app_dir }}" },
     
+    # Incremental attestation benchmark directory (sibling of sgx-tdx-attestation)
+    { path = "/benchmark", uri = "file:{{ app_dir }}/../incremental_attestation" },
+    
     # Temporary filesystem
     { type = "tmpfs", path = "/tmp" },
 ]
@@ -98,6 +101,10 @@ sgx.trusted_files = [
     "file:{{ app_dir }}/sgx-verifier/",
     "file:{{ app_dir }}/common/",
     
+    # Incremental attestation benchmark scripts (only .py files, not results/charts)
+    "file:{{ app_dir }}/../incremental_attestation/benchmark_incremental.py",
+    "file:{{ app_dir }}/../incremental_attestation/ima_pcr_verify.py",
+    
     # SSL/TLS certificates (system CA bundle)
     "file:/etc/ssl/certs/",
     "file:/usr/share/ca-certificates/",
@@ -121,6 +128,10 @@ sgx.allowed_files = [
     # Certificate directory (contains CA cert, client cert, and client key for mTLS)
     # These files are needed for mutual TLS authentication with TDX server
     "file:{{ app_dir }}/certs/",
+
+    # Benchmark output directory — must be allowed_files (not trusted_files)
+    # so the benchmark script can write results CSV from inside the enclave
+    "file:{{ app_dir }}/../incremental_attestation/results_optimized_sgx.csv",
 ]
 
 # ============================================================================
