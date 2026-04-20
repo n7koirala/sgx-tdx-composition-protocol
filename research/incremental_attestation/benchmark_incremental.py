@@ -312,13 +312,18 @@ def run_benchmark_for_mode(mode_label, read_mode, tdx_host, tdx_port,
     """
     all_results = []
 
-    # For optimized mode, force repeats=1 to avoid accumulating extra IMA
-    # entries (each repeat generates Δn new entries, which can push the
-    # total past the next baseline target). Non-optimized reopens the fd
-    # each time and doesn't generate new entries, so repeats are fine.
-    if read_mode == "optimized" and repeats > 1:
-        print(f"\n  ⚠ Optimized mode: forcing repeats=1 (each repeat generates")
-        print(f"    new IMA entries that would exceed subsequent baselines)")
+    # Force repeats=1 for BOTH modes to keep the PCR-10 replay consistent
+    # and comparable:
+    #   - Optimized: each repeat generates Δn new entries that would
+    #     exceed subsequent baselines.
+    #   - Non-optimized: `current_offset` isn't advanced between repeats
+    #     (the CVM reopens its fd each round), so rep 2+ reads the same
+    #     Δn entries rep 1 did.  The subscriber's rolling PCR state has
+    #     already folded those entries in, so re-extending them produces
+    #     a false PCR-10 mismatch.
+    if repeats > 1:
+        print(f"\n  ⚠ Forcing repeats=1 for PCR-replay consistency "
+              f"(both modes run a single round per (N, Δn)).")
         repeats = 1
 
     print(f"\n{'═' * 80}")
