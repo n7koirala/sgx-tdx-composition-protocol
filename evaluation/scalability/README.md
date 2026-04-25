@@ -8,8 +8,10 @@ This folder contains a paper-oriented benchmark harness for comparing:
 ## Files
 
 - `run_direct_dcap_sweep.py`: reuses `research/tdx-dcap-attestation/dcap_with_library.py` and writes CSV/JSON summaries for the direct fresh-quote baseline.
-- `vordr_server.py`: lightweight single-WEN service with cached verified TDX state and a cheap per-user proof.
-- `run_vordr_sweep.py`: drives a concurrency sweep against one WEN and records throughput, latency, staleness, and amplification.
+- `vordr_server.py`: single-WEN service with cached verified TDX state; supports both lightweight and full-evidence responses.
+- `run_vordr_sweep.py`: drives a concurrency sweep against one WEN and records throughput, latency, staleness, amplification, and full-evidence payload sizes.
+- `generate_command_logs.py`: generates realistic ASP/WEN command audit logs for the full-evidence path.
+- `generate_ima_workload.py`: generates file/exec activity on a CVM so the IMA event log grows before a benchmark run.
 - `plot_scalability.py`: generates comparison figures from the resulting CSV files.
 - `challenge.tex`: short formal paragraph for the paper's motivation/challenge section.
 
@@ -73,6 +75,38 @@ python3 run_vordr_sweep.py \
   --no-verify-tdx
 ```
 
+Generate a command log bundle on the WEN machine:
+
+```bash
+cd evaluation/scalability
+python3 generate_command_logs.py \
+  --entries 2000 \
+  --with-transition-log \
+  --out-dir ../results/scalability/full-evidence-inputs
+```
+
+Generate more IMA activity on the TDX/CVM machine before a full-evidence run:
+
+```bash
+cd evaluation/scalability
+python3 generate_ima_workload.py --count 500 --keep-files
+```
+
+Single-WEN run with the full evidence bundle (`quote + IMA log + PCR10 + command log`):
+
+```bash
+cd evaluation/scalability
+python3 run_vordr_sweep.py \
+  --users 16,64,256,512,1024 \
+  --duration-s 10 \
+  --evidence-mode full \
+  --refresh-backend sgx-verifier \
+  --tdx-host <TDX_IP> \
+  --tdx-port 8443 \
+  --command-log-file ../results/scalability/full-evidence-inputs/audit_log.jsonl \
+  --no-verify-tdx
+```
+
 Plotting:
 
 ```bash
@@ -86,3 +120,4 @@ python3 plot_scalability.py \
 
 The direct baseline should be reported as a fresh-quote system: each request forces quote generation. The Vordr benchmark should be reported as a cached-attestation system: the WEN amortizes one background TDX attestation over many end-user responses. The key comparison metric is therefore not just throughput, but also `amplification = successful_end_user_attestations / TDX_refreshes`.
 
+For `--evidence-mode full`, the CSV also reports response payload sizes and the snapshot sizes of the raw quote, IMA log, and command log. That mode answers a different question from the lightweight mode: not just whether one WEN can serve many users, but whether it can serve many users while returning the full attestation evidence set that an end user would need to verify the CVM state independently.
