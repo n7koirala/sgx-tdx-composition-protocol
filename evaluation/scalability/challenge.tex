@@ -1,0 +1,16 @@
+\paragraph{Direct TDX Attestation Bottleneck.}
+In a conventional DCAP-based deployment, each end-user attestation request
+must carry a fresh nonce, and that nonce must be embedded into a newly
+generated TDX quote. Consequently, $N$ independent users induce $N$ hardware
+quote-generation operations. Although PCCS/DCAP removes the Intel Trust
+Authority network dependency, it does not remove the per-request quote cost:
+the TDX module must produce a nonce-bound report and the quoting path must
+serialize access to the attestation key material, making quote generation the
+dominant scalability bottleneck while quote verification remains comparatively
+cheap. As user demand increases, the TDX VM therefore behaves as a queued
+single-service point whose throughput is bounded by hardware quote generation.
+Vordr addresses this limitation by moving TDX attestation off the critical
+path: a WEN attests the TDX VM once per refresh interval and then serves many
+end users from cached verified state, amortizing one expensive TDX attestation
+across a large number of end-user attestation responses.
+
