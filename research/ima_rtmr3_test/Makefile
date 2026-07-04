@@ -1,7 +1,7 @@
 # Isolated IMA -> RTMR[3] test harness.
 
 TDX_HOST ?= localhost
-TDX_PORT ?= 9443
+TDX_PORT ?= 8443
 METHOD ?= dcap
 COUNT ?= 10
 RTMR3_BASE ?= auto
@@ -17,11 +17,11 @@ help:
 	@echo ""
 	@echo "CVM-side:"
 	@echo "  make check-cvm"
-	@echo "  make agent TDX_PORT=9443"
+	@echo "  make agent TDX_PORT=8443"
 	@echo "  make events COUNT=10"
 	@echo ""
 	@echo "WEN-side:"
-	@echo "  make verify TDX_HOST=<cvm-ip> TDX_PORT=9443"
+	@echo "  make verify TDX_HOST=<cvm-ip> TDX_PORT=8443"
 	@echo "  make save-golden TDX_HOST=<cvm-ip> GOLDEN=golden_boot.json"
 	@echo "  make verify-golden TDX_HOST=<cvm-ip> GOLDEN=golden_boot.json"
 	@echo "  make sgx-build"

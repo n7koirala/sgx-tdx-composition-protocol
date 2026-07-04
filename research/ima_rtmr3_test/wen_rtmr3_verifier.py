@@ -150,7 +150,7 @@ def main() -> None:
         epilog=__doc__,
     )
     parser.add_argument("--tdx-host", required=True)
-    parser.add_argument("--tdx-port", type=int, default=9443)
+    parser.add_argument("--tdx-port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--ca-cert")
     parser.add_argument("--no-verify", action="store_true")
     parser.add_argument("--timeout", type=float, default=120.0)

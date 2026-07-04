@@ -63,8 +63,7 @@ by the agent and verifies that the quote matches the replay from that base.
 
 ## CVM Side
 
-Use a separate port, `9443`, so this can run alongside the existing TDX server
-on `8443`.
+Use port `8443`, which is the existing working firewall path. Stop the older TDX server on `8443` before starting this RTMR3 test agent.
 
 ```bash
 cd ~/sgx-tdx-composition-protocol/research/ima_rtmr3_test
@@ -74,7 +73,7 @@ sudo python3 cvm_rtmr3_agent.py --test
 Start the agent:
 
 ```bash
-sudo python3 cvm_rtmr3_agent.py --port 9443 --method dcap
+sudo python3 cvm_rtmr3_agent.py --port 8443 --method dcap
 ```
 
 Expected startup behavior:
@@ -86,7 +85,7 @@ Expected startup behavior:
 Waiting for WEN verifier requests...
 ```
 
-If the WEN is outside the CVM network, open firewall port `9443` from the WEN
+If the WEN is outside the CVM network, open firewall port `8443` from the WEN
 machine to this CVM.
 
 ## WEN Side, Pure Python Smoke Test
@@ -97,7 +96,7 @@ export CVM_IP=<cvm-ip>
 
 python3 wen_rtmr3_verifier.py \
   --tdx-host "$CVM_IP" \
-  --tdx-port 9443 \
+  --tdx-port 8443 \
   --no-verify
 ```
 
@@ -117,7 +116,7 @@ First run after launching a known-good CVM:
 ```bash
 python3 wen_rtmr3_verifier.py \
   --tdx-host "$CVM_IP" \
-  --tdx-port 9443 \
+  --tdx-port 8443 \
   --no-verify \
   --save-golden golden_boot.json
 ```
@@ -127,7 +126,7 @@ Then enforce MRTD/RTMR[0..2] checks:
 ```bash
 python3 wen_rtmr3_verifier.py \
   --tdx-host "$CVM_IP" \
-  --tdx-port 9443 \
+  --tdx-port 8443 \
   --no-verify \
   --golden-file golden_boot.json \
   --require-golden
@@ -138,7 +137,7 @@ For a strict RTMR[3] base check on a clean CVM, replace the default auto base:
 ```bash
 python3 wen_rtmr3_verifier.py \
   --tdx-host "$CVM_IP" \
-  --tdx-port 9443 \
+  --tdx-port 8443 \
   --no-verify \
   --expected-rtmr3-base zero \
   --golden-file golden_boot.json \
@@ -162,7 +161,7 @@ The agent should print that it extended new entries. Then rerun on WEN:
 ```bash
 python3 wen_rtmr3_verifier.py \
   --tdx-host "$CVM_IP" \
-  --tdx-port 9443 \
+  --tdx-port 8443 \
   --no-verify \
   --golden-file golden_boot.json \
   --require-golden
@@ -185,7 +184,7 @@ Run without a golden file:
 ```bash
 gramine-sgx ./verifier /app/wen_rtmr3_verifier.py \
   --tdx-host "$CVM_IP" \
-  --tdx-port 9443 \
+  --tdx-port 8443 \
   --no-verify
 ```
 
@@ -195,7 +194,7 @@ Run with the golden file saved at
 ```bash
 gramine-sgx ./verifier /app/wen_rtmr3_verifier.py \
   --tdx-host "$CVM_IP" \
-  --tdx-port 9443 \
+  --tdx-port 8443 \
   --no-verify \
   --golden-file /app/golden_boot.json \
   --require-golden

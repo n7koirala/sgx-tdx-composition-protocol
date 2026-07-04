@@ -18,7 +18,7 @@ Behavior:
        - RTMR[3] anchoring metadata for this experiment.
 
 Run on the CVM:
-    sudo python3 cvm_rtmr3_agent.py --port 9443 --method dcap
+    sudo python3 cvm_rtmr3_agent.py --port 8443 --method dcap
 """
 
 from __future__ import annotations
@@ -473,7 +473,7 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--port", type=int, default=9443)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--cert", default=None)
     parser.add_argument("--key", default=None)
     parser.add_argument("--method", choices=(METHOD_DCAP, METHOD_ITA), default=METHOD_DCAP)

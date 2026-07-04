@@ -11,7 +11,7 @@ SGX_SIGNING_KEY ?= $(HOME)/.config/gramine/enclave-key.pem
 LOG_LEVEL       ?= error
 
 TDX_HOST ?= localhost
-TDX_PORT ?= 9443
+TDX_PORT ?= 8443
 RTMR3_BASE ?= auto
 RUN_ARGS ?=
 
