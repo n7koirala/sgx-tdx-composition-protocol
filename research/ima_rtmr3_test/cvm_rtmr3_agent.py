@@ -56,8 +56,11 @@ from common.protocol import (  # type: ignore
 
 from ima_rtmr3_common import (
     IMABinaryEntry,
+    count_ascii_ima_entries,
+    locate_ima_ascii_log,
     locate_ima_binary_log,
     locate_rtmr_measurements_dir,
+    read_ima_ascii_log,
     read_ima_binary_log,
     read_ima_count,
     read_mr_hex,
@@ -89,6 +92,7 @@ class CVMRTMR3Agent:
         self.config_path = config_path
 
         self.ima_binary_path = locate_ima_binary_log()
+        self.ima_ascii_path = locate_ima_ascii_log()
         self.measurements_dir = locate_rtmr_measurements_dir()
         self.rtmr3_path = rtmr_attr_path(3, self.measurements_dir)
 
@@ -276,6 +280,8 @@ class CVMRTMR3Agent:
                 ima_blob, entries, new_count = self._sync_new_entries_locked()
                 t_sync_ms = (time.perf_counter() - t_sync0) * 1000.0
 
+                ima_ascii_log = read_ima_ascii_log(self.ima_ascii_path)
+                ascii_count = count_ascii_ima_entries(ima_ascii_log)
                 ima_count_before = read_ima_count()
 
                 t_quote0 = time.perf_counter()
@@ -295,7 +301,8 @@ class CVMRTMR3Agent:
                 entry_count = len(entries)
                 count_stable = (
                     ima_count_before == entry_count and
-                    ima_count_after == entry_count
+                    ima_count_after == entry_count and
+                    ascii_count == entry_count
                 )
                 snapshot = {
                     "consistent": count_stable,
@@ -304,10 +311,11 @@ class CVMRTMR3Agent:
                     "ima_entries": entry_count,
                     "ima_count_before": ima_count_before,
                     "ima_count_after": ima_count_after,
+                    "ima_ascii_entries": ascii_count,
                     "new_entries_synced_for_request": new_count,
                 }
                 last = (
-                    ima_blob, entries, new_count, pcr10, quote_bytes, mrtd,
+                    ima_blob, ima_ascii_log, entries, new_count, pcr10, quote_bytes, mrtd,
                     raw_quote_b64, token, attestation_method, t_sync_ms,
                     t_quote_ms, rtmr3_current, ima_count_after
                 )
@@ -317,7 +325,7 @@ class CVMRTMR3Agent:
 
                 print(
                     "    [SNAPSHOT] unstable "
-                    f"(attempt={attempt}, entries={entry_count}, "
+                    f"(attempt={attempt}, entries={entry_count}, ascii={ascii_count}, "
                     f"count_before={ima_count_before}, count_after={ima_count_after}); retrying"
                 )
 
@@ -325,7 +333,7 @@ class CVMRTMR3Agent:
                 raise RuntimeError("failed to collect attestation evidence")
 
             (
-                ima_blob, entries, new_count, pcr10, quote_bytes, mrtd,
+                ima_blob, ima_ascii_log, entries, new_count, pcr10, quote_bytes, mrtd,
                 raw_quote_b64, token, attestation_method, t_sync_ms,
                 t_quote_ms, rtmr3_current, ima_count_kernel
             ) = last
@@ -340,6 +348,7 @@ class CVMRTMR3Agent:
                 "raw_quote": raw_quote_b64,
                 "token": token,
                 "ima_binary_log_b64": base64.b64encode(ima_blob).decode("ascii"),
+                "ima_ascii_log_b64": base64.b64encode(ima_ascii_log.encode("utf-8")).decode("ascii"),
                 "ima_entry_count": len(entries),
                 "ima_count_kernel": ima_count_kernel,
                 "pcr10_sha1": pcr10,
@@ -374,6 +383,7 @@ class CVMRTMR3Agent:
                 "status": "success",
                 "protocol": TEST_PROTOCOL_VERSION,
                 "ima_binary_path": self.ima_binary_path,
+                "ima_ascii_path": self.ima_ascii_path,
                 "ima_count_kernel": read_ima_count(),
                 "anchored_count": self.anchored_count,
                 "rtmr3_path": self.rtmr3_path,
@@ -452,6 +462,7 @@ class CVMRTMR3Agent:
         print(f"Port:            {self.port}")
         print(f"Method:          {self.method}")
         print(f"IMA binary log:  {self.ima_binary_path}")
+        print(f"IMA ASCII log:   {self.ima_ascii_path}")
         print(f"RTMR[3] attr:    {self.rtmr3_path}")
         print(f"Anchored count:  {self.anchored_count:,}")
         print(f"PCR10 SHA-1:     {read_pcr10_sha1()[:16]}...")

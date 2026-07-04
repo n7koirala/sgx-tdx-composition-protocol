@@ -53,6 +53,11 @@ IMA_BINARY_PATHS = (
     "/sys/kernel/security/ima/binary_runtime_measurements",
 )
 
+IMA_ASCII_PATHS = (
+    "/sys/kernel/security/integrity/ima/ascii_runtime_measurements",
+    "/sys/kernel/security/ima/ascii_runtime_measurements",
+)
+
 IMA_COUNT_PATHS = (
     "/sys/kernel/security/integrity/ima/runtime_measurements_count",
     "/sys/kernel/security/ima/runtime_measurements_count",
@@ -223,6 +228,65 @@ def replay_pcr10_sha1(entries: Iterable[IMABinaryEntry],
     )
 
 
+def ascii_ima_entries(log_text: str) -> List[Tuple[int, str]]:
+    """Return (PCR index, template_hash_hex) pairs from the ASCII IMA log."""
+    entries: List[Tuple[int, str]] = []
+    for line in log_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 4)
+        if len(parts) < 2:
+            continue
+        try:
+            pcr_index = int(parts[0])
+        except ValueError:
+            continue
+        entries.append((pcr_index, parts[1].strip().lower()))
+    return entries
+
+
+def replay_pcr10_sha1_ascii(log_text: str,
+                            base: bytes = ZERO_PCR_SHA1) -> PCRReplayResult:
+    """Replay PCR-10 from the ASCII log's SHA-1 template-hash column."""
+    if len(base) != 20:
+        raise ValueError(f"PCR SHA-1 base must be 20 bytes, got {len(base)}")
+
+    state = base
+    used = 0
+    skipped = 0
+    for pcr_index, template_hash_hex in ascii_ima_entries(log_text):
+        if pcr_index != 10:
+            continue
+        try:
+            template_hash = bytes.fromhex(template_hash_hex)
+        except ValueError:
+            skipped += 1
+            continue
+        if len(template_hash) != 20:
+            skipped += 1
+            continue
+        state = hashlib.sha1(state + template_hash).digest()
+        used += 1
+
+    return PCRReplayResult(
+        pcr_hex=state.hex(),
+        entry_count=used,
+        skipped_count=skipped,
+    )
+
+
+def count_ascii_ima_entries(log_text: str) -> int:
+    return len([line for line in log_text.splitlines() if line.strip()])
+
+
+def binary_ascii_template_hash_match(entries: Iterable[IMABinaryEntry],
+                                     log_text: str) -> bool:
+    binary_hashes = [entry.template_hash.hex() for entry in entries if entry.pcr_index == 10]
+    ascii_hashes = [h for pcr, h in ascii_ima_entries(log_text) if pcr == 10]
+    return binary_hashes == ascii_hashes
+
+
 def find_first_existing(paths: Iterable[str]) -> Optional[str]:
     for path in paths:
         if os.path.exists(path):
@@ -239,6 +303,15 @@ def locate_ima_binary_log() -> str:
     return path
 
 
+def locate_ima_ascii_log() -> str:
+    path = find_first_existing(IMA_ASCII_PATHS)
+    if not path:
+        raise FileNotFoundError(
+            "IMA ASCII log not found. Tried: " + ", ".join(IMA_ASCII_PATHS)
+        )
+    return path
+
+
 def locate_ima_count_path() -> Optional[str]:
     return find_first_existing(IMA_COUNT_PATHS)
 
@@ -248,6 +321,12 @@ def read_ima_binary_log(path: Optional[str] = None) -> Tuple[bytes, List[IMABina
     with open(path, "rb") as f:
         blob = f.read()
     return blob, parse_ima_binary_log(blob)
+
+
+def read_ima_ascii_log(path: Optional[str] = None) -> str:
+    path = path or locate_ima_ascii_log()
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
 
 
 def read_ima_count() -> int:

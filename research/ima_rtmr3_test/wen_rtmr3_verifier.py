@@ -50,8 +50,11 @@ from ima_rtmr3_common import (
     ZERO_RTMR_SHA384,
     hex_to_48,
     load_json_file,
+    binary_ascii_template_hash_match,
+    count_ascii_ima_entries,
     parse_ima_binary_log,
     replay_pcr10_sha1,
+    replay_pcr10_sha1_ascii,
     replay_rtmr3,
     write_json_file,
 )
@@ -186,6 +189,17 @@ def main() -> None:
 
     ima_blob = base64.b64decode(response["ima_binary_log_b64"])
     entries = parse_ima_binary_log(ima_blob)
+    ima_ascii_b64 = response.get("ima_ascii_log_b64", "")
+    ima_ascii_log = (
+        base64.b64decode(ima_ascii_b64).decode("utf-8", errors="replace")
+        if ima_ascii_b64 else ""
+    )
+    ascii_entry_count = count_ascii_ima_entries(ima_ascii_log) if ima_ascii_log else 0
+    binary_ascii_count_match = bool(ima_ascii_log) and ascii_entry_count == len(entries)
+    binary_ascii_hash_match = (
+        binary_ascii_template_hash_match(entries, ima_ascii_log)
+        if ima_ascii_log else False
+    )
 
     rtmr3_base, rtmr3_base_source = resolve_rtmr3_base(
         args.expected_rtmr3_base,
@@ -195,7 +209,11 @@ def main() -> None:
     quoted_rtmr3 = quote_info.rtmr3.lower()
     rtmr3_match = expected_rtmr3 == quoted_rtmr3
 
-    pcr_result = replay_pcr10_sha1(entries)
+    pcr_source = "ascii" if ima_ascii_log else "binary"
+    pcr_result = (
+        replay_pcr10_sha1_ascii(ima_ascii_log)
+        if ima_ascii_log else replay_pcr10_sha1(entries)
+    )
     claimed_pcr10 = response.get("pcr10_sha1", "").strip().lower()
     pcr10_match = bool(claimed_pcr10) and pcr_result.pcr_hex == claimed_pcr10
 
@@ -215,7 +233,7 @@ def main() -> None:
     quote_ok = bool(quote_result.verified)
     snapshot = response.get("snapshot", {})
     snapshot_ok = bool(snapshot.get("consistent", True))
-    overall_ok = quote_ok and rtmr3_match and pcr10_match and golden_ok and snapshot_ok
+    overall_ok = quote_ok and rtmr3_match and pcr10_match and golden_ok and snapshot_ok and binary_ascii_count_match
 
     summary = {
         "ok": overall_ok,
@@ -228,6 +246,9 @@ def main() -> None:
         "golden_ok": golden_ok,
         "golden_loaded": golden_loaded,
         "ima_entries": len(entries),
+        "ima_ascii_entries": ascii_entry_count,
+        "binary_ascii_count_match": binary_ascii_count_match,
+        "binary_ascii_hash_match": binary_ascii_hash_match,
         "ima_count_kernel": response.get("ima_count_kernel"),
         "anchored_count": response.get("anchor", {}).get("anchored_count"),
         "rtmr3_base_source": rtmr3_base_source,
@@ -235,6 +256,7 @@ def main() -> None:
         "expected_rtmr3": expected_rtmr3,
         "quoted_rtmr3": quoted_rtmr3,
         "agent_rtmr3_current": response.get("anchor", {}).get("rtmr3_current", ""),
+        "pcr10_source": pcr_source,
         "expected_pcr10_sha1": pcr_result.pcr_hex,
         "claimed_pcr10_sha1": claimed_pcr10,
         "pcr10_entries": pcr_result.entry_count,
@@ -280,7 +302,9 @@ def main() -> None:
             print("  Golden file:      not provided; MRTD/RTMR0-2 are reported only")
         print()
         print("IMA -> RTMR[3] anchor:")
-        print(f"  IMA entries:      {len(entries):,}")
+        print(f"  IMA entries:      {len(entries):,} binary, {ascii_entry_count:,} ASCII")
+        print(f"  Binary/ASCII ct:  {'OK' if binary_ascii_count_match else 'MISMATCH'}")
+        print(f"  Binary/ASCII dig: {'OK' if binary_ascii_hash_match else 'MISMATCH'}")
         print(f"  Agent anchored:   {summary['anchored_count']}")
         print(f"  RTMR3 base:       {short(rtmr3_base.hex(), 48)} ({rtmr3_base_source})")
         print(f"  Expected RTMR3:   {short(expected_rtmr3, 48)}")
@@ -294,6 +318,7 @@ def main() -> None:
                   f"after={snapshot.get('ima_count_after')})")
         print()
         print("PCR-10 defense-in-depth:")
+        print(f"  PCR10 source:     {pcr_source}")
         print(f"  PCR10 entries:    {pcr_result.entry_count:,}")
         print(f"  Expected PCR10:   {pcr_result.pcr_hex}")
         print(f"  Claimed PCR10:    {claimed_pcr10 or '<missing>'}")
