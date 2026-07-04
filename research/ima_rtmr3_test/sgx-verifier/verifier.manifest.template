@@ -1,0 +1,77 @@
+# Gramine manifest for the isolated IMA -> RTMR[3] WEN verifier.
+
+libos.entrypoint = "{{ python_path }}"
+
+loader.log_level = "{{ log_level }}"
+loader.insecure__use_cmdline_argv = true
+
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/{{ arch_libdir }}"
+loader.env.PATH = "/bin:/usr/bin"
+loader.env.HOME = "/home/user"
+loader.env.PYTHONPATH = "/app:/sgx-tdx"
+
+fs.mounts = [
+    { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+    { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+    { path = "/usr/{{ arch_libdir }}", uri = "file:/usr/{{ arch_libdir }}" },
+    { path = "/usr/lib", uri = "file:/usr/lib" },
+
+    { path = "{{ python_path }}", uri = "file:{{ python_path }}" },
+    { path = "/usr/lib/python{{ python_version }}", uri = "file:/usr/lib/python{{ python_version }}" },
+    { path = "/usr/lib/python3/dist-packages", uri = "file:/usr/lib/python3/dist-packages" },
+    { path = "/usr/lib/python3", uri = "file:/usr/lib/python3" },
+
+    { path = "/etc", uri = "file:/etc" },
+
+    # /app contains the isolated RTMR3 test verifier and common parser.
+    { path = "/app", uri = "file:{{ test_dir }}" },
+
+    # /sgx-tdx contains common/protocol.py for message framing and DCAP quote checks.
+    { path = "/sgx-tdx", uri = "file:{{ sgx_tdx_dir }}" },
+
+    { type = "tmpfs", path = "/tmp" },
+]
+
+sgx.remote_attestation = "dcap"
+sgx.debug = true
+sgx.enclave_size = "2G"
+sgx.max_threads = 32
+sgx.isvprodid = 1
+sgx.isvsvn = 0
+
+sys.insecure__allow_eventfd = true
+sys.stack.size = "2M"
+sys.enable_sigterm_injection = true
+sys.enable_extra_runtime_domain_names_conf = true
+
+sgx.trusted_files = [
+    "file:{{ python_path }}",
+    "file:{{ gramine.runtimedir() }}/",
+    "file:{{ arch_libdir }}/",
+    "file:/usr/{{ arch_libdir }}/",
+    "file:/usr/lib/python{{ python_version }}/",
+    "file:/usr/lib/python3/dist-packages/",
+    "file:/usr/lib/python3/",
+
+    "file:{{ test_dir }}/wen_rtmr3_verifier.py",
+    "file:{{ test_dir }}/ima_rtmr3_common.py",
+    "file:{{ sgx_tdx_dir }}/common/",
+
+    "file:/etc/ssl/certs/",
+    "file:/usr/share/ca-certificates/",
+]
+
+sgx.allowed_files = [
+    "file:/etc/nsswitch.conf",
+    "file:/etc/host.conf",
+    "file:/etc/resolv.conf",
+    "file:/etc/hosts",
+    "file:/etc/localtime",
+    "file:/etc/passwd",
+    "file:/etc/group",
+    "file:/etc/gai.conf",
+
+    # Test-only golden file.  For a strict SGX measurement, freeze this file
+    # before signing and move it to trusted_files.
+    "file:{{ test_dir }}/golden_boot.json",
+]
