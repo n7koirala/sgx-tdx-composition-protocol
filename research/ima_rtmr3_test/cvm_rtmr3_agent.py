@@ -267,24 +267,68 @@ class CVMRTMR3Agent:
             return {"status": "error", "error": "missing nonce"}
 
         with self._lock:
-            t_sync0 = time.perf_counter()
-            ima_blob, entries, new_count = self._sync_new_entries_locked()
-            t_sync_ms = (time.perf_counter() - t_sync0) * 1000.0
+            max_attempts = 8
+            snapshot = {}
+            last = None
 
-            pcr10 = read_pcr10_sha1()
+            for attempt in range(1, max_attempts + 1):
+                t_sync0 = time.perf_counter()
+                ima_blob, entries, new_count = self._sync_new_entries_locked()
+                t_sync_ms = (time.perf_counter() - t_sync0) * 1000.0
 
-            t_quote0 = time.perf_counter()
-            if self.method == METHOD_DCAP:
-                quote_bytes, mrtd = self.get_tdx_quote_dcap(nonce)
-                raw_quote_b64 = base64.b64encode(quote_bytes).decode("ascii")
-                token = ""
-                attestation_method = METHOD_DCAP
-            else:
-                raise RuntimeError("ITA mode is not implemented in this RTMR3 test agent")
-            t_quote_ms = (time.perf_counter() - t_quote0) * 1000.0
+                ima_count_before = read_ima_count()
 
-            rtmr3_current = read_mr_hex(self.rtmr3_path)
-            ima_count_kernel = read_ima_count()
+                t_quote0 = time.perf_counter()
+                if self.method == METHOD_DCAP:
+                    quote_bytes, mrtd = self.get_tdx_quote_dcap(nonce)
+                    raw_quote_b64 = base64.b64encode(quote_bytes).decode("ascii")
+                    token = ""
+                    attestation_method = METHOD_DCAP
+                else:
+                    raise RuntimeError("ITA mode is not implemented in this RTMR3 test agent")
+                t_quote_ms = (time.perf_counter() - t_quote0) * 1000.0
+
+                pcr10 = read_pcr10_sha1()
+                ima_count_after = read_ima_count()
+                rtmr3_current = read_mr_hex(self.rtmr3_path)
+
+                entry_count = len(entries)
+                count_stable = (
+                    ima_count_before == entry_count and
+                    ima_count_after == entry_count
+                )
+                snapshot = {
+                    "consistent": count_stable,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                    "ima_entries": entry_count,
+                    "ima_count_before": ima_count_before,
+                    "ima_count_after": ima_count_after,
+                    "new_entries_synced_for_request": new_count,
+                }
+                last = (
+                    ima_blob, entries, new_count, pcr10, quote_bytes, mrtd,
+                    raw_quote_b64, token, attestation_method, t_sync_ms,
+                    t_quote_ms, rtmr3_current, ima_count_after
+                )
+
+                if count_stable:
+                    break
+
+                print(
+                    "    [SNAPSHOT] unstable "
+                    f"(attempt={attempt}, entries={entry_count}, "
+                    f"count_before={ima_count_before}, count_after={ima_count_after}); retrying"
+                )
+
+            if last is None:
+                raise RuntimeError("failed to collect attestation evidence")
+
+            (
+                ima_blob, entries, new_count, pcr10, quote_bytes, mrtd,
+                raw_quote_b64, token, attestation_method, t_sync_ms,
+                t_quote_ms, rtmr3_current, ima_count_kernel
+            ) = last
 
             return {
                 "status": "success",
@@ -299,6 +343,7 @@ class CVMRTMR3Agent:
                 "ima_entry_count": len(entries),
                 "ima_count_kernel": ima_count_kernel,
                 "pcr10_sha1": pcr10,
+                "snapshot": snapshot,
                 "anchor": {
                     "rtmr_index": 3,
                     "hash_alg": "sha384",

@@ -213,7 +213,9 @@ def main() -> None:
         save_golden(args.save_golden, quote_info, rtmr3_base.hex())
 
     quote_ok = bool(quote_result.verified)
-    overall_ok = quote_ok and rtmr3_match and pcr10_match and golden_ok
+    snapshot = response.get("snapshot", {})
+    snapshot_ok = bool(snapshot.get("consistent", True))
+    overall_ok = quote_ok and rtmr3_match and pcr10_match and golden_ok and snapshot_ok
 
     summary = {
         "ok": overall_ok,
@@ -221,6 +223,8 @@ def main() -> None:
         "quote_verdict": quote_result.verdict,
         "rtmr3_match": rtmr3_match,
         "pcr10_match": pcr10_match,
+        "snapshot_consistent": snapshot_ok,
+        "snapshot": snapshot,
         "golden_ok": golden_ok,
         "golden_loaded": golden_loaded,
         "ima_entries": len(entries),
@@ -282,6 +286,12 @@ def main() -> None:
         print(f"  Expected RTMR3:   {short(expected_rtmr3, 48)}")
         print(f"  Quoted RTMR3:     {short(quoted_rtmr3, 48)}")
         print(f"  RTMR3 check:      {'OK' if rtmr3_match else 'MISMATCH'}")
+        if snapshot:
+            print(f"  Snapshot stable:  {'OK' if snapshot_ok else 'MISMATCH'} "
+                  f"(attempt={snapshot.get('attempt')}, "
+                  f"entries={snapshot.get('ima_entries')}, "
+                  f"before={snapshot.get('ima_count_before')}, "
+                  f"after={snapshot.get('ima_count_after')})")
         print()
         print("PCR-10 defense-in-depth:")
         print(f"  PCR10 entries:    {pcr_result.entry_count:,}")
