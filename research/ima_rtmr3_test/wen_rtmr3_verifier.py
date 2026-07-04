@@ -55,6 +55,7 @@ from ima_rtmr3_common import (
     parse_ima_binary_log,
     replay_pcr10_sha1,
     replay_pcr10_sha1_ascii,
+    replay_pcr10_sha256_binary,
     replay_rtmr3,
     write_json_file,
 )
@@ -209,13 +210,24 @@ def main() -> None:
     quoted_rtmr3 = quote_info.rtmr3.lower()
     rtmr3_match = expected_rtmr3 == quoted_rtmr3
 
-    pcr_source = "ascii" if ima_ascii_log else "binary"
-    pcr_result = (
+    pcr_sha1_source = "ascii" if ima_ascii_log else "binary"
+    pcr_sha1_result = (
         replay_pcr10_sha1_ascii(ima_ascii_log)
         if ima_ascii_log else replay_pcr10_sha1(entries)
     )
-    claimed_pcr10 = response.get("pcr10_sha1", "").strip().lower()
-    pcr10_match = bool(claimed_pcr10) and pcr_result.pcr_hex == claimed_pcr10
+    claimed_pcr10_sha1 = response.get("pcr10_sha1", "").strip().lower()
+    pcr10_sha1_match = bool(claimed_pcr10_sha1) and pcr_sha1_result.pcr_hex == claimed_pcr10_sha1
+
+    pcr_sha256_result = replay_pcr10_sha256_binary(entries)
+    claimed_pcr10_sha256 = response.get("pcr10_sha256", "").strip().lower()
+    pcr10_sha256_match = bool(claimed_pcr10_sha256) and pcr_sha256_result.pcr_hex == claimed_pcr10_sha256
+
+    pcr10_match = pcr10_sha1_match or pcr10_sha256_match
+    pcr_source = (
+        "sha1/ascii" if pcr10_sha1_match else
+        "sha256/binary" if pcr10_sha256_match else
+        "none"
+    )
 
     golden_loaded = False
     golden_ok = True
@@ -257,10 +269,14 @@ def main() -> None:
         "quoted_rtmr3": quoted_rtmr3,
         "agent_rtmr3_current": response.get("anchor", {}).get("rtmr3_current", ""),
         "pcr10_source": pcr_source,
-        "expected_pcr10_sha1": pcr_result.pcr_hex,
-        "claimed_pcr10_sha1": claimed_pcr10,
-        "pcr10_entries": pcr_result.entry_count,
-        "pcr10_skipped": pcr_result.skipped_count,
+        "pcr10_sha1_match": pcr10_sha1_match,
+        "expected_pcr10_sha1": pcr_sha1_result.pcr_hex,
+        "claimed_pcr10_sha1": claimed_pcr10_sha1,
+        "pcr10_sha256_match": pcr10_sha256_match,
+        "expected_pcr10_sha256": pcr_sha256_result.pcr_hex,
+        "claimed_pcr10_sha256": claimed_pcr10_sha256,
+        "pcr10_entries": pcr_sha1_result.entry_count,
+        "pcr10_skipped": pcr_sha1_result.skipped_count,
         "mrtd": quote_info.mrtd,
         "rtmr0": quote_info.rtmr0,
         "rtmr1": quote_info.rtmr1,
@@ -319,9 +335,13 @@ def main() -> None:
         print()
         print("PCR-10 defense-in-depth:")
         print(f"  PCR10 source:     {pcr_source}")
-        print(f"  PCR10 entries:    {pcr_result.entry_count:,}")
-        print(f"  Expected PCR10:   {pcr_result.pcr_hex}")
-        print(f"  Claimed PCR10:    {claimed_pcr10 or '<missing>'}")
+        print(f"  SHA-1 entries:    {pcr_sha1_result.entry_count:,} ({pcr_sha1_source})")
+        print(f"  SHA-1 expected:   {pcr_sha1_result.pcr_hex}")
+        print(f"  SHA-1 claimed:    {claimed_pcr10_sha1 or '<missing>'}")
+        print(f"  SHA-1 check:      {'OK' if pcr10_sha1_match else 'MISMATCH'}")
+        print(f"  SHA-256 expected: {pcr_sha256_result.pcr_hex}")
+        print(f"  SHA-256 claimed:  {claimed_pcr10_sha256 or '<missing>'}")
+        print(f"  SHA-256 check:    {'OK' if pcr10_sha256_match else 'MISMATCH'}")
         print(f"  PCR10 check:      {'OK' if pcr10_match else 'MISMATCH'}")
         print()
         if args.save_golden:

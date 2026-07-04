@@ -65,6 +65,7 @@ from ima_rtmr3_common import (
     read_ima_count,
     read_mr_hex,
     read_pcr10_sha1,
+    read_pcr10_sha256,
     replay_rtmr3,
     rtmr_attr_path,
     write_rtmr_digest,
@@ -295,6 +296,7 @@ class CVMRTMR3Agent:
                 t_quote_ms = (time.perf_counter() - t_quote0) * 1000.0
 
                 pcr10 = read_pcr10_sha1()
+                pcr10_sha256 = read_pcr10_sha256()
                 ima_count_after = read_ima_count()
                 rtmr3_current = read_mr_hex(self.rtmr3_path)
 
@@ -315,7 +317,7 @@ class CVMRTMR3Agent:
                     "new_entries_synced_for_request": new_count,
                 }
                 last = (
-                    ima_blob, ima_ascii_log, entries, new_count, pcr10, quote_bytes, mrtd,
+                    ima_blob, ima_ascii_log, entries, new_count, pcr10, pcr10_sha256, quote_bytes, mrtd,
                     raw_quote_b64, token, attestation_method, t_sync_ms,
                     t_quote_ms, rtmr3_current, ima_count_after
                 )
@@ -333,7 +335,7 @@ class CVMRTMR3Agent:
                 raise RuntimeError("failed to collect attestation evidence")
 
             (
-                ima_blob, ima_ascii_log, entries, new_count, pcr10, quote_bytes, mrtd,
+                ima_blob, ima_ascii_log, entries, new_count, pcr10, pcr10_sha256, quote_bytes, mrtd,
                 raw_quote_b64, token, attestation_method, t_sync_ms,
                 t_quote_ms, rtmr3_current, ima_count_kernel
             ) = last
@@ -352,6 +354,7 @@ class CVMRTMR3Agent:
                 "ima_entry_count": len(entries),
                 "ima_count_kernel": ima_count_kernel,
                 "pcr10_sha1": pcr10,
+                "pcr10_sha256": pcr10_sha256,
                 "snapshot": snapshot,
                 "anchor": {
                     "rtmr_index": 3,

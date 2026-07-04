@@ -47,6 +47,7 @@ from typing import Iterable, List, Optional, Tuple
 CANON_MAGIC = b"IMA-RTMR3-CANON-v1\x00"
 ZERO_RTMR_SHA384 = b"\x00" * 48
 ZERO_PCR_SHA1 = b"\x00" * 20
+ZERO_PCR_SHA256 = b"\x00" * 32
 
 IMA_BINARY_PATHS = (
     "/sys/kernel/security/integrity/ima/binary_runtime_measurements",
@@ -66,6 +67,10 @@ IMA_COUNT_PATHS = (
 PCR10_SHA1_PATHS = (
     "/sys/class/tpm/tpm0/pcr-sha1/10",
     "/sys/class/tpm/tpm0/pcrs",  # fallback parser, if needed
+)
+
+PCR10_SHA256_PATHS = (
+    "/sys/class/tpm/tpm0/pcr-sha256/10",
 )
 
 RTMR_MEASUREMENTS_DIRS = (
@@ -276,6 +281,29 @@ def replay_pcr10_sha1_ascii(log_text: str,
     )
 
 
+def replay_pcr10_sha256_binary(entries: Iterable[IMABinaryEntry],
+                               base: bytes = ZERO_PCR_SHA256) -> PCRReplayResult:
+    """Replay PCR-10 SHA-256 bank from binary template_data."""
+    if len(base) != 32:
+        raise ValueError(f"PCR SHA-256 base must be 32 bytes, got {len(base)}")
+
+    state = base
+    used = 0
+    skipped = 0
+    for entry in entries:
+        if entry.pcr_index != 10:
+            continue
+        template_hash = hashlib.sha256(entry.template_data).digest()
+        state = hashlib.sha256(state + template_hash).digest()
+        used += 1
+
+    return PCRReplayResult(
+        pcr_hex=state.hex(),
+        entry_count=used,
+        skipped_count=skipped,
+    )
+
+
 def count_ascii_ima_entries(log_text: str) -> int:
     return len([line for line in log_text.splitlines() if line.strip()])
 
@@ -355,6 +383,14 @@ def read_pcr10_sha1() -> str:
                 if line.startswith("PCR-10:"):
                     return line.split(":", 1)[1].strip().lower()
 
+    return ""
+
+
+def read_pcr10_sha256() -> str:
+    direct = PCR10_SHA256_PATHS[0]
+    if os.path.exists(direct):
+        with open(direct, "r", encoding="utf-8") as f:
+            return f.read().strip().lower()
     return ""
 
 
