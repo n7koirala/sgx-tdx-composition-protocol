@@ -151,10 +151,13 @@ AK bind field:      OK
 AK RTMR step:       OK
 RTMR3 check:        OK
 Signature/nonce:    OK
-Cert binds AK:      OK
 PCR10 signed:       OK
 Overall:            OK
 ```
+
+`Cert binds AK` is reported separately. It is not enforced by default because
+gotpm/GCP certificate output can require additional chain decoding. To make it
+a hard policy check, add `--require-ak-cert`.
 
 ## Create And Use A Golden Boot File
 

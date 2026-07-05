@@ -169,6 +169,11 @@ def main() -> None:
     parser.add_argument("--golden-file", help="JSON with expected mrtd/rtmr0/rtmr1/rtmr2")
     parser.add_argument("--save-golden", help="Write observed mrtd/rtmr0/rtmr1/rtmr2 to JSON")
     parser.add_argument("--require-golden", action="store_true")
+    parser.add_argument(
+        "--require-ak-cert",
+        action="store_true",
+        help="Fail unless the presented Google AK certificate public key binds to ak_pub",
+    )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable summary")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
@@ -276,13 +281,14 @@ def main() -> None:
     snapshot_ok = bool(snapshot.get("consistent", True))
     count_stable = bool(snapshot.get("count_stable", snapshot_ok))
     post_quote_drift = int(snapshot.get("post_quote_drift", 0) or 0)
+    ak_cert_policy_ok = vtpm.cert_binds_ak or not args.require_ak_cert
     overall_ok = (
         quote_ok
         and rtmr3_match
         and pcr10_signed_match
         and pcr10_prefix_count_match
         and ak_bind_consistent
-        and vtpm.cert_binds_ak
+        and ak_cert_policy_ok
         and golden_ok
         and snapshot_ok
         and binary_ascii_count_match
@@ -316,6 +322,8 @@ def main() -> None:
         "vtpm_signature_ok": vtpm.signature_ok,
         "vtpm_nonce_ok": vtpm.nonce_ok,
         "vtpm_cert_binds_ak": vtpm.cert_binds_ak,
+        "require_ak_cert": args.require_ak_cert,
+        "ak_cert_policy_ok": ak_cert_policy_ok,
         "vtpm_detail": vtpm.detail,
         "vtpm_quoted_pcr10_sha256": quoted_pcr10,
         "replayed_pcr10_sha256": replayed_pcr10,
@@ -404,7 +412,9 @@ def main() -> None:
         print("Signed vTPM PCR-10 quote:")
         print(f"  Quote bank:       {response.get('vtpm_quote_bank', '<missing>')}")
         print(f"  Signature/nonce:  {'OK' if vtpm.signature_ok and vtpm.nonce_ok else 'FAIL'}")
-        print(f"  Cert binds AK:    {'OK' if vtpm.cert_binds_ak else 'FAIL'}")
+        cert_status = 'OK' if vtpm.cert_binds_ak else 'FAIL'
+        cert_policy = 'required' if args.require_ak_cert else 'not required'
+        print(f"  Cert binds AK:    {cert_status} ({cert_policy})")
         if vtpm.detail:
             print(f"  Detail:           {vtpm.detail}")
         print(f"  Quoted PCR10:     {quoted_pcr10 or '<missing>'}")
