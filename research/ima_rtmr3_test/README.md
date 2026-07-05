@@ -6,15 +6,18 @@ protocol files.
 
 ## Design
 
-The CVM agent reads the kernel binary IMA measurement list, extends RTMR[3],
-then returns a nonce-bound DCAP quote plus the binary IMA log and PCR-10 value
-to the WEN verifier.
+The CVM agent reads the kernel binary IMA measurement list, binds the
+GCP-provisioned vTPM AK into RTMR[3], extends RTMR[3] with the IMA chain, then
+returns a nonce-bound DCAP quote, the binary IMA log, and a nonce-bound vTPM
+quote over PCR-10 to the WEN verifier.
 
-The verifier checks three things:
+The verifier checks five things:
 
-1. The quoted RTMR[3] equals replay(binary IMA log).
-2. MRTD and RTMR[0..2] equal golden boot values when a golden file is provided.
-3. PCR-10 SHA-1 replay from the same binary IMA log equals the vTPM PCR-10 value.
+1. The TDX quote is valid and binds the WEN nonce.
+2. The quoted RTMR[3] equals replay(firmware base -> SHA384(ak_pub) -> binary IMA log).
+3. The vTPM quote is valid, fresh, signed by the AK, and covers SHA-256 PCR-10.
+4. The AK hashed into RTMR[3] is the same AK that signed the PCR-10 quote.
+5. MRTD and RTMR[0..2] equal golden boot values when a golden file is provided.
 
 ## Canonical IMA Event Mapping
 
@@ -50,6 +53,39 @@ new_rtmr3 = SHA384(old_rtmr3 || event_extend_input)
 This intentionally does not extend the IMA template hash directly. The digest
 is over canonicalized binary event contents, including the full template data.
 
+Before replaying IMA entries, the agent first extends `SHA384(ak_pub)` into
+RTMR[3], where `ak_pub` is the marshalled TPM2B_PUBLIC for the GCP-provisioned
+AK. The verifier uses the same transmitted `ak_pub` bytes to recompute that
+extend step and verifies that this is also the key that signed the vTPM PCR-10
+quote.
+
+## vTPM AK And Tooling Requirements
+
+CVM side requirements:
+
+- GCP-provisioned AK available at `GCP_AK_HANDLE` (default `0x810000801`).
+- Google AK certificate readable from `GCP_AK_CERT_NV` (default `0x1c10000`).
+- `tpm2-tools` installed: `tpm2_readpublic`, `tpm2_nvread`, and `tpm2_quote`.
+
+WEN side requirements:
+
+- `tpm2_checkquote` installed. This is used offline; the WEN does not need a
+  TPM device for quote verification.
+- Python `cryptography` installed if `google_ak_cert_b64` is present and the
+  verifier should check that the AK public key matches the Google leaf cert.
+
+If the AK is provisioned at a different persistent handle, set:
+
+```bash
+export GCP_AK_HANDLE=<handle>
+```
+
+If the certificate is at a different NV index, set:
+
+```bash
+export GCP_AK_CERT_NV=<nv-index>
+```
+
 ## Important Test Semantics
 
 RTMRs cannot be reset inside a live TD. The startup behavior intentionally
@@ -79,8 +115,10 @@ sudo python3 cvm_rtmr3_agent.py --port 8443 --method dcap
 Expected startup behavior:
 
 ```text
-[RTMR3] startup replay anchored N entries in ... ms
+[RTMR3] AK bound: SHA384(ak_pub)=...
+[RTMR3] startup anchored N entries in ... ms
 [RTMR3] base   : ...
+[RTMR3] after AK: ...
 [RTMR3] current: ...
 Waiting for WEN verifier requests...
 ```
@@ -104,8 +142,12 @@ Expected result:
 
 ```text
 Quote verdict:      TRUSTED
+AK bind field:      OK
+AK RTMR step:       OK
 RTMR3 check:        OK
-PCR10 check:        OK
+Signature/nonce:    OK
+Cert binds AK:      OK
+PCR10 signed:       OK
 Overall:            OK
 ```
 
@@ -210,6 +252,7 @@ For this prototype it is left as an allowed test input.
 cvm_rtmr3_agent.py       CVM-side RTMR[3] anchor and attestation server
 wen_rtmr3_verifier.py    WEN verifier for quote, RTMR[3], PCR-10, golden boot
 ima_rtmr3_common.py      Binary IMA parser and canonical replay logic
+vtpm_quote.py            vTPM AK loading, PCR-10 quote generation, verification
 generate_ima_events.py   CVM workload helper for appending IMA entries
 sgx-verifier/            Isolated Gramine SGX wrapper for the WEN verifier
 ```

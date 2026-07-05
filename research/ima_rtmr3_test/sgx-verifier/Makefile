@@ -22,6 +22,7 @@ all: verifier.manifest.sgx verifier.sig
 verifier.manifest: verifier.manifest.template \
                    $(TEST_DIR)/wen_rtmr3_verifier.py \
                    $(TEST_DIR)/ima_rtmr3_common.py \
+                   $(TEST_DIR)/vtpm_quote.py \
                    $(SGX_TDX_DIR)/common/protocol.py
 	@echo "[1/2] Generating IMA-RTMR3 verifier manifest..."
 	gramine-manifest \

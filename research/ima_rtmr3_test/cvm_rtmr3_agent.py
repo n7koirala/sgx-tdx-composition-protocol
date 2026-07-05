@@ -70,6 +70,7 @@ from ima_rtmr3_common import (
     rtmr_attr_path,
     write_rtmr_digest,
 )
+from vtpm_quote import VtpmAk, rtmr_extend
 
 
 TEST_PROTOCOL_VERSION = "ima-rtmr3-test-v1"
@@ -96,6 +97,10 @@ class CVMRTMR3Agent:
         self.ima_ascii_path = locate_ima_ascii_log()
         self.measurements_dir = locate_rtmr_measurements_dir()
         self.rtmr3_path = rtmr_attr_path(3, self.measurements_dir)
+
+        # vTPM AK: GCP-provisioned key that signs PCR-10 and is bound into RTMR3.
+        self.vtpm = VtpmAk()
+        self.rtmr3_after_ak_bind = ""
 
         self._tdx_lib = None
         self._lock = threading.Lock()
@@ -177,6 +182,20 @@ class CVMRTMR3Agent:
             self.anchor_started_at = datetime.now(timezone.utc).isoformat()
             self.rtmr3_base_before_start = read_mr_hex(self.rtmr3_path)
 
+            ak_digest = self.vtpm.ak_pub_sha384
+            write_rtmr_digest(self.rtmr3_path, ak_digest)
+            self.rtmr3_after_ak_bind = read_mr_hex(self.rtmr3_path)
+            expected_ak = rtmr_extend(
+                bytes.fromhex(self.rtmr3_base_before_start),
+                ak_digest,
+            ).hex()
+            if expected_ak != self.rtmr3_after_ak_bind:
+                raise RuntimeError(
+                    "AK-bind RTMR3 mismatch: "
+                    f"expected={expected_ak}, actual={self.rtmr3_after_ak_bind}"
+                )
+            print(f"[RTMR3] AK bound: SHA384(ak_pub)={ak_digest.hex()[:24]}...")
+
             t0 = time.perf_counter()
             _, entries = read_ima_binary_log(self.ima_binary_path)
             self._extend_entries_locked(entries, 0)
@@ -187,7 +206,7 @@ class CVMRTMR3Agent:
 
             expected = replay_rtmr3(
                 entries,
-                base=bytes.fromhex(self.rtmr3_base_before_start),
+                base=bytes.fromhex(self.rtmr3_after_ak_bind),
             ).hex()
             if expected != self.rtmr3_after_startup_replay:
                 raise RuntimeError(
@@ -196,10 +215,11 @@ class CVMRTMR3Agent:
                 )
 
             print(
-                f"[RTMR3] startup replay anchored {self.anchored_count:,} entries "
+                f"[RTMR3] startup anchored {self.anchored_count:,} entries "
                 f"in {elapsed_ms:.1f} ms"
             )
             print(f"[RTMR3] base   : {self.rtmr3_base_before_start}")
+            print(f"[RTMR3] after AK: {self.rtmr3_after_ak_bind}")
             print(f"[RTMR3] current: {self.rtmr3_after_startup_replay}")
 
     def _sync_new_entries_locked(self) -> Tuple[bytes, List[IMABinaryEntry], int]:
@@ -288,6 +308,7 @@ class CVMRTMR3Agent:
                 t_quote0 = time.perf_counter()
                 if self.method == METHOD_DCAP:
                     quote_bytes, mrtd = self.get_tdx_quote_dcap(nonce)
+                    vtpm = self.vtpm.quote_pcr10(base64.b64decode(nonce), bank="sha256")
                     raw_quote_b64 = base64.b64encode(quote_bytes).decode("ascii")
                     token = ""
                     attestation_method = METHOD_DCAP
@@ -318,7 +339,7 @@ class CVMRTMR3Agent:
                 }
                 last = (
                     ima_blob, ima_ascii_log, entries, new_count, pcr10, pcr10_sha256, quote_bytes, mrtd,
-                    raw_quote_b64, token, attestation_method, t_sync_ms,
+                    raw_quote_b64, token, attestation_method, vtpm, t_sync_ms,
                     t_quote_ms, rtmr3_current, ima_count_after
                 )
 
@@ -336,7 +357,7 @@ class CVMRTMR3Agent:
 
             (
                 ima_blob, ima_ascii_log, entries, new_count, pcr10, pcr10_sha256, quote_bytes, mrtd,
-                raw_quote_b64, token, attestation_method, t_sync_ms,
+                raw_quote_b64, token, attestation_method, vtpm, t_sync_ms,
                 t_quote_ms, rtmr3_current, ima_count_kernel
             ) = last
 
@@ -349,6 +370,7 @@ class CVMRTMR3Agent:
                 "mrtd": mrtd,
                 "raw_quote": raw_quote_b64,
                 "token": token,
+                **vtpm,
                 "ima_binary_log_b64": base64.b64encode(ima_blob).decode("ascii"),
                 "ima_ascii_log_b64": base64.b64encode(ima_ascii_log.encode("utf-8")).decode("ascii"),
                 "ima_entry_count": len(entries),
@@ -366,6 +388,8 @@ class CVMRTMR3Agent:
                     ),
                     "canon_magic_hex": "494d412d52544d52332d43414e4f4e2d763100",
                     "rtmr3_base_before_start": self.rtmr3_base_before_start,
+                    "rtmr3_after_ak_bind": self.rtmr3_after_ak_bind,
+                    "ak_pub_sha384": self.vtpm.ak_pub_sha384.hex(),
                     "rtmr3_after_startup_replay": self.rtmr3_after_startup_replay,
                     "rtmr3_current": rtmr3_current,
                     "anchored_count": self.anchored_count,
@@ -392,6 +416,8 @@ class CVMRTMR3Agent:
                 "rtmr3_path": self.rtmr3_path,
                 "rtmr3_current": read_mr_hex(self.rtmr3_path),
                 "rtmr3_base_before_start": self.rtmr3_base_before_start,
+                "rtmr3_after_ak_bind": self.rtmr3_after_ak_bind,
+                "ak_pub_sha384": self.vtpm.ak_pub_sha384.hex(),
                 "extend_errors": self.extend_errors[-5:],
                 "stats": self.stats,
             }
@@ -467,6 +493,8 @@ class CVMRTMR3Agent:
         print(f"IMA binary log:  {self.ima_binary_path}")
         print(f"IMA ASCII log:   {self.ima_ascii_path}")
         print(f"RTMR[3] attr:    {self.rtmr3_path}")
+        print(f"AK SHA384:       {self.vtpm.ak_pub_sha384.hex()[:24]}...")
+        print(f"AK cert present: {'yes' if self.vtpm.cert_der else 'no'}")
         print(f"Anchored count:  {self.anchored_count:,}")
         print(f"PCR10 SHA-1:     {read_pcr10_sha1()[:16]}...")
         print(f"TLS cert:        {self.cert_file}")
@@ -516,6 +544,17 @@ def self_test() -> bool:
     pcr10 = read_pcr10_sha1()
     print(f"PCR10 SHA-1: {pcr10 or '<unavailable>'}")
     checks.append(("PCR10 SHA-1 readable", bool(pcr10)))
+
+    try:
+        vtpm = VtpmAk()
+        print(f"vTPM AK SHA384: {vtpm.ak_pub_sha384.hex()}")
+        print(f"Google AK cert present: {'yes' if vtpm.cert_der else 'no'}")
+        checks.append(("GCP vTPM AK readable", True))
+        checks.append(("Google AK cert present", vtpm.cert_der is not None))
+    except Exception as exc:
+        print(f"vTPM AK error: {exc}")
+        checks.append(("GCP vTPM AK readable", False))
+        checks.append(("Google AK cert present", False))
 
     print("\nChecks:")
     ok = True

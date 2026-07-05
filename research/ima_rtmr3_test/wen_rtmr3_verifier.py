@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import socket
@@ -59,6 +60,7 @@ from ima_rtmr3_common import (
     replay_rtmr3,
     write_json_file,
 )
+from vtpm_quote import verify_pcr10_quote, rtmr_extend
 
 
 TEST_PROTOCOL_VERSION = "ima-rtmr3-test-v1"
@@ -206,7 +208,19 @@ def main() -> None:
         args.expected_rtmr3_base,
         response,
     )
-    expected_rtmr3 = replay_rtmr3(entries, base=rtmr3_base).hex()
+
+    nonce_bytes = base64.b64decode(nonce)
+    vtpm = verify_pcr10_quote(response, nonce_bytes)
+    anchor = response.get("anchor", {})
+    anchor_ak_sha384 = anchor.get("ak_pub_sha384", "").strip().lower()
+    ak_bind_consistent = vtpm.ak_sha384 == anchor_ak_sha384
+
+    ak_digest = bytes.fromhex(vtpm.ak_sha384)
+    base_after_ak = rtmr_extend(rtmr3_base, ak_digest)
+    reported_after_ak = anchor.get("rtmr3_after_ak_bind", "").strip().lower()
+    ak_bind_rtmr3_match = bool(reported_after_ak) and reported_after_ak == base_after_ak.hex()
+
+    expected_rtmr3 = replay_rtmr3(entries, base=base_after_ak).hex()
     quoted_rtmr3 = quote_info.rtmr3.lower()
     rtmr3_match = expected_rtmr3 == quoted_rtmr3
 
@@ -222,12 +236,11 @@ def main() -> None:
     claimed_pcr10_sha256 = response.get("pcr10_sha256", "").strip().lower()
     pcr10_sha256_match = bool(claimed_pcr10_sha256) and pcr_sha256_result.pcr_hex == claimed_pcr10_sha256
 
-    pcr10_match = pcr10_sha1_match or pcr10_sha256_match
-    pcr_source = (
-        "sha1/ascii" if pcr10_sha1_match else
-        "sha256/binary" if pcr10_sha256_match else
-        "none"
-    )
+    replayed_pcr10 = pcr_sha256_result.pcr_hex
+    quoted_pcr10 = vtpm.quoted_pcr10
+    pcr10_signed_match = vtpm.ok and quoted_pcr10 == replayed_pcr10
+    pcr10_match = pcr10_signed_match
+    pcr_source = "vtpm/sha256" if pcr10_signed_match else "none"
 
     golden_loaded = False
     golden_ok = True
@@ -245,7 +258,16 @@ def main() -> None:
     quote_ok = bool(quote_result.verified)
     snapshot = response.get("snapshot", {})
     snapshot_ok = bool(snapshot.get("consistent", True))
-    overall_ok = quote_ok and rtmr3_match and pcr10_match and golden_ok and snapshot_ok and binary_ascii_count_match
+    overall_ok = (
+        quote_ok
+        and rtmr3_match
+        and pcr10_signed_match
+        and ak_bind_consistent
+        and vtpm.cert_binds_ak
+        and golden_ok
+        and snapshot_ok
+        and binary_ascii_count_match
+    )
 
     summary = {
         "ok": overall_ok,
@@ -269,10 +291,23 @@ def main() -> None:
         "quoted_rtmr3": quoted_rtmr3,
         "agent_rtmr3_current": response.get("anchor", {}).get("rtmr3_current", ""),
         "pcr10_source": pcr_source,
-        "pcr10_sha1_match": pcr10_sha1_match,
+        "pcr10_signed_match": pcr10_signed_match,
+        "vtpm_signature_ok": vtpm.signature_ok,
+        "vtpm_nonce_ok": vtpm.nonce_ok,
+        "vtpm_cert_binds_ak": vtpm.cert_binds_ak,
+        "vtpm_detail": vtpm.detail,
+        "vtpm_quoted_pcr10_sha256": quoted_pcr10,
+        "replayed_pcr10_sha256": replayed_pcr10,
+        "ak_pub_sha384": vtpm.ak_sha384,
+        "anchor_ak_pub_sha384": anchor_ak_sha384,
+        "ak_bind_consistent": ak_bind_consistent,
+        "ak_bind_rtmr3_match": ak_bind_rtmr3_match,
+        "rtmr3_after_ak_bind": base_after_ak.hex(),
+        "agent_rtmr3_after_ak_bind": reported_after_ak,
+        "pcr10_sha1_match_debug": pcr10_sha1_match,
         "expected_pcr10_sha1": pcr_sha1_result.pcr_hex,
         "claimed_pcr10_sha1": claimed_pcr10_sha1,
-        "pcr10_sha256_match": pcr10_sha256_match,
+        "pcr10_sha256_match_debug": pcr10_sha256_match,
         "expected_pcr10_sha256": pcr_sha256_result.pcr_hex,
         "claimed_pcr10_sha256": claimed_pcr10_sha256,
         "pcr10_entries": pcr_sha1_result.entry_count,
@@ -323,6 +358,11 @@ def main() -> None:
         print(f"  Binary/ASCII dig: {'OK' if binary_ascii_hash_match else 'MISMATCH'}")
         print(f"  Agent anchored:   {summary['anchored_count']}")
         print(f"  RTMR3 base:       {short(rtmr3_base.hex(), 48)} ({rtmr3_base_source})")
+        print(f"  AK SHA384:        {short(vtpm.ak_sha384, 48)}")
+        print(f"  AK bind field:    {'OK' if ak_bind_consistent else 'MISMATCH'}")
+        print(f"  After AK bind:    {short(base_after_ak.hex(), 48)}")
+        print(f"  Agent after AK:   {short(reported_after_ak, 48)}")
+        print(f"  AK RTMR step:     {'OK' if ak_bind_rtmr3_match else 'MISMATCH'}")
         print(f"  Expected RTMR3:   {short(expected_rtmr3, 48)}")
         print(f"  Quoted RTMR3:     {short(quoted_rtmr3, 48)}")
         print(f"  RTMR3 check:      {'OK' if rtmr3_match else 'MISMATCH'}")
@@ -333,7 +373,17 @@ def main() -> None:
                   f"before={snapshot.get('ima_count_before')}, "
                   f"after={snapshot.get('ima_count_after')})")
         print()
-        print("PCR-10 defense-in-depth:")
+        print("Signed vTPM PCR-10 quote:")
+        print(f"  Quote bank:       {response.get('vtpm_quote_bank', '<missing>')}")
+        print(f"  Signature/nonce:  {'OK' if vtpm.signature_ok and vtpm.nonce_ok else 'FAIL'}")
+        print(f"  Cert binds AK:    {'OK' if vtpm.cert_binds_ak else 'FAIL'}")
+        if vtpm.detail:
+            print(f"  Detail:           {vtpm.detail}")
+        print(f"  Quoted PCR10:     {quoted_pcr10 or '<missing>'}")
+        print(f"  Replayed PCR10:   {replayed_pcr10}")
+        print(f"  PCR10 signed:     {'OK' if pcr10_signed_match else 'MISMATCH'}")
+        print()
+        print("PCR-10 debug fields:")
         print(f"  PCR10 source:     {pcr_source}")
         print(f"  SHA-1 entries:    {pcr_sha1_result.entry_count:,} ({pcr_sha1_source})")
         print(f"  SHA-1 expected:   {pcr_sha1_result.pcr_hex}")
