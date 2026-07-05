@@ -66,6 +66,7 @@ from ima_rtmr3_common import (
     read_mr_hex,
     read_pcr10_sha1,
     read_pcr10_sha256,
+    find_pcr10_sha256_prefix,
     replay_pcr10_sha256_binary,
     replay_rtmr3,
     rtmr_attr_path,
@@ -331,9 +332,13 @@ class CVMRTMR3Agent:
                 ascii_count = count_ascii_ima_entries(ima_ascii_log)
                 ima_count_before = read_ima_count()
 
-                pcr_replay = replay_pcr10_sha256_binary(entries).pcr_hex
+                pcr_full_replay = replay_pcr10_sha256_binary(entries).pcr_hex
                 vtpm_pcr10 = self._vtpm_pcr10_hex(vtpm)
-                pcr_signed_snapshot_match = bool(vtpm_pcr10) and vtpm_pcr10 == pcr_replay
+                pcr_prefix_count, pcr_prefix_replay = find_pcr10_sha256_prefix(
+                    entries,
+                    vtpm_pcr10,
+                )
+                pcr_signed_snapshot_match = bool(vtpm_pcr10) and pcr_prefix_count is not None
 
                 entry_count = len(entries)
                 pre_quote_consistent = (
@@ -373,7 +378,9 @@ class CVMRTMR3Agent:
                     "pre_quote_consistent": pre_quote_consistent,
                     "pcr_signed_snapshot_match": pcr_signed_snapshot_match,
                     "vtpm_pcr10_at_quote": vtpm_pcr10,
-                    "replayed_pcr10_at_snapshot": pcr_replay,
+                    "vtpm_ima_prefix_entries": pcr_prefix_count,
+                    "replayed_pcr10_at_prefix": pcr_prefix_replay.pcr_hex,
+                    "replayed_pcr10_at_snapshot": pcr_full_replay,
                     "post_quote_drift": post_quote_drift,
                     "attempt": attempt,
                     "max_attempts": max_attempts,
@@ -403,7 +410,7 @@ class CVMRTMR3Agent:
                     "    [SNAPSHOT] PCR/log not aligned "
                     f"(attempt={attempt}, entries={entry_count}, ascii={ascii_count}, "
                     f"count_before={ima_count_before}, vtpm_pcr10={vtpm_pcr10[:16]}..., "
-                    f"replay={pcr_replay[:16]}...); retrying"
+                    f"full_replay={pcr_full_replay[:16]}...); retrying"
                 )
 
             if last is None:

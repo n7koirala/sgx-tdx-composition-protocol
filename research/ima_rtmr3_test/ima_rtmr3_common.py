@@ -297,6 +297,14 @@ def replay_pcr10_sha1_ascii(log_text: str,
     )
 
 
+def _pcr10_sha256_entry_digest(entry: IMABinaryEntry) -> bytes:
+    return (
+        b"\xff" * 32
+        if entry.template_hash == ZERO_TEMPLATE_SHA1
+        else hashlib.sha256(entry.template_data).digest()
+    )
+
+
 def replay_pcr10_sha256_binary(entries: Iterable[IMABinaryEntry],
                                base: bytes = ZERO_PCR_SHA256) -> PCRReplayResult:
     """Replay PCR-10 SHA-256 bank from binary template_data.
@@ -314,12 +322,7 @@ def replay_pcr10_sha256_binary(entries: Iterable[IMABinaryEntry],
     for entry in entries:
         if entry.pcr_index != 10:
             continue
-        template_hash = (
-            b"\xff" * 32
-            if entry.template_hash == ZERO_TEMPLATE_SHA1
-            else hashlib.sha256(entry.template_data).digest()
-        )
-        state = hashlib.sha256(state + template_hash).digest()
+        state = hashlib.sha256(state + _pcr10_sha256_entry_digest(entry)).digest()
         used += 1
 
     return PCRReplayResult(
@@ -327,6 +330,40 @@ def replay_pcr10_sha256_binary(entries: Iterable[IMABinaryEntry],
         entry_count=used,
         skipped_count=skipped,
     )
+
+
+def find_pcr10_sha256_prefix(entries: Iterable[IMABinaryEntry],
+                             target_hex: str,
+                             base: bytes = ZERO_PCR_SHA256
+                             ) -> Tuple[Optional[int], PCRReplayResult]:
+    """Find the shortest IMA log prefix that replays to a SHA-256 PCR value.
+
+    gotpm can sign PCR-10 before the gotpm process has finished triggering all
+    of its own IMA measurements. In that case the signed PCR corresponds to a
+    prefix of the append-only IMA log, while RTMR[3] may already cover the full
+    current log. This helper returns the prefix length in IMA entries, not just
+    PCR-10 entries.
+    """
+    if len(base) != 32:
+        raise ValueError(f"PCR SHA-256 base must be 32 bytes, got {len(base)}")
+
+    target = target_hex.strip().lower()
+    state = base
+    used = 0
+    skipped = 0
+    if target == state.hex():
+        return 0, PCRReplayResult(state.hex(), used, skipped)
+
+    last_result = PCRReplayResult(state.hex(), used, skipped)
+    for index, entry in enumerate(entries):
+        if entry.pcr_index == 10:
+            state = hashlib.sha256(state + _pcr10_sha256_entry_digest(entry)).digest()
+            used += 1
+            last_result = PCRReplayResult(state.hex(), used, skipped)
+            if state.hex() == target:
+                return index + 1, last_result
+
+    return None, last_result
 
 
 def count_ascii_ima_entries(log_text: str) -> int:

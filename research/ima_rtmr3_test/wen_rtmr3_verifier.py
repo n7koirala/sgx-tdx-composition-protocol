@@ -54,6 +54,7 @@ from ima_rtmr3_common import (
     binary_ascii_template_hash_match,
     count_ascii_ima_entries,
     parse_ima_binary_log,
+    find_pcr10_sha256_prefix,
     replay_pcr10_sha1,
     replay_pcr10_sha1_ascii,
     replay_pcr10_sha256_binary,
@@ -236,11 +237,26 @@ def main() -> None:
     claimed_pcr10_sha256 = response.get("pcr10_sha256", "").strip().lower()
     pcr10_sha256_match = bool(claimed_pcr10_sha256) and pcr_sha256_result.pcr_hex == claimed_pcr10_sha256
 
-    replayed_pcr10 = pcr_sha256_result.pcr_hex
     quoted_pcr10 = vtpm.quoted_pcr10
-    pcr10_signed_match = vtpm.ok and quoted_pcr10 == replayed_pcr10
+    pcr10_prefix_count, pcr10_prefix_result = find_pcr10_sha256_prefix(
+        entries,
+        quoted_pcr10,
+    )
+    reported_prefix_count = response.get("snapshot", {}).get("vtpm_ima_prefix_entries")
+    pcr10_prefix_count_match = (
+        reported_prefix_count is None
+        or reported_prefix_count == pcr10_prefix_count
+    )
+    replayed_pcr10 = (
+        pcr10_prefix_result.pcr_hex
+        if pcr10_prefix_count is not None else pcr_sha256_result.pcr_hex
+    )
+    pcr10_signed_match = vtpm.ok and pcr10_prefix_count is not None
     pcr10_match = pcr10_signed_match
-    pcr_source = "vtpm/sha256" if pcr10_signed_match else "none"
+    pcr_source = (
+        f"vtpm/sha256-prefix/{pcr10_prefix_count}"
+        if pcr10_signed_match else "none"
+    )
 
     golden_loaded = False
     golden_ok = True
@@ -264,6 +280,7 @@ def main() -> None:
         quote_ok
         and rtmr3_match
         and pcr10_signed_match
+        and pcr10_prefix_count_match
         and ak_bind_consistent
         and vtpm.cert_binds_ak
         and golden_ok
@@ -302,6 +319,10 @@ def main() -> None:
         "vtpm_detail": vtpm.detail,
         "vtpm_quoted_pcr10_sha256": quoted_pcr10,
         "replayed_pcr10_sha256": replayed_pcr10,
+        "pcr10_prefix_entries": pcr10_prefix_count,
+        "reported_pcr10_prefix_entries": reported_prefix_count,
+        "pcr10_prefix_count_match": pcr10_prefix_count_match,
+        "full_replayed_pcr10_sha256": pcr_sha256_result.pcr_hex,
         "ak_pub_sha384": vtpm.ak_sha384,
         "anchor_ak_pub_sha384": anchor_ak_sha384,
         "ak_bind_consistent": ak_bind_consistent,
@@ -388,6 +409,10 @@ def main() -> None:
             print(f"  Detail:           {vtpm.detail}")
         print(f"  Quoted PCR10:     {quoted_pcr10 or '<missing>'}")
         print(f"  Replayed PCR10:   {replayed_pcr10}")
+        print(f"  PCR10 prefix:     {pcr10_prefix_count if pcr10_prefix_count is not None else '<none>'} entries")
+        if reported_prefix_count is not None:
+            print(f"  Agent prefix:     {reported_prefix_count} entries "
+                  f"({'OK' if pcr10_prefix_count_match else 'MISMATCH'})")
         print(f"  PCR10 signed:     {'OK' if pcr10_signed_match else 'MISMATCH'}")
         print()
         print("PCR-10 debug fields:")
