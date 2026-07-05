@@ -35,6 +35,44 @@ def replay_sha256_ascii_sha1_hashes(log_text: str) -> str:
             digest = bytes.fromhex(template_hash_hex)
         except ValueError:
             continue
+        if digest == b"\x00" * 20:
+            digest = b"\xff" * 32
+        state = hashlib.sha256(state + digest).digest()
+    return state.hex()
+
+
+def replay_sha1_ascii_skip_zero(log_text: str) -> str:
+    state = b"\x00" * 20
+    for pcr, template_hash_hex in ascii_ima_entries(log_text):
+        if pcr != 10 or template_hash_hex == "0" * 40:
+            continue
+        try:
+            digest = bytes.fromhex(template_hash_hex)
+        except ValueError:
+            continue
+        state = hashlib.sha1(state + digest).digest()
+    return state.hex()
+
+
+def replay_sha256_binary_skip_zero(entries) -> str:
+    state = b"\x00" * 32
+    for entry in entries:
+        if entry.pcr_index != 10 or entry.template_hash == b"\x00" * 20:
+            continue
+        digest = hashlib.sha256(entry.template_data).digest()
+        state = hashlib.sha256(state + digest).digest()
+    return state.hex()
+
+
+def replay_sha256_ascii_sha1_skip_zero(log_text: str) -> str:
+    state = b"\x00" * 32
+    for pcr, template_hash_hex in ascii_ima_entries(log_text):
+        if pcr != 10 or template_hash_hex == "0" * 40:
+            continue
+        try:
+            digest = bytes.fromhex(template_hash_hex)
+        except ValueError:
+            continue
         state = hashlib.sha256(state + digest).digest()
     return state.hex()
 
@@ -104,9 +142,13 @@ def main() -> int:
     print(f"binary_ascii_hashes   = {'MATCH' if hash_match else 'MISMATCH'}")
 
     sha1_data_mismatch = 0
+    zero_hash_violations = 0
     first_mismatch = None
     for entry in entries:
         computed = hashlib.sha1(entry.template_data).digest()
+        if entry.template_hash == b"\x00" * 20:
+            zero_hash_violations += 1
+            continue
         if computed != entry.template_hash:
             sha1_data_mismatch += 1
             if first_mismatch is None:
@@ -118,10 +160,12 @@ def main() -> int:
                     len(entry.template_data),
                 )
 
-    print(f"sha1(template_data)   = {len(entries) - sha1_data_mismatch}/{len(entries)} entries match")
+    comparable = len(entries) - zero_hash_violations
+    print(f"zero_hash_violations = {zero_hash_violations}")
+    print(f"sha1(template_data)   = {comparable - sha1_data_mismatch}/{comparable} comparable entries match")
     if first_mismatch:
         idx, name, logged, computed, data_len = first_mismatch
-        print("first_data_mismatch:")
+        print("first_nonzero_data_mismatch:")
         print(f"  index              = {idx}")
         print(f"  template           = {name}")
         print(f"  logged_sha1        = {logged}")
@@ -132,6 +176,9 @@ def main() -> int:
     sha1_binary = replay_pcr10_sha1(entries)
     sha256_binary = replay_pcr10_sha256_binary(entries)
     sha256_ascii_sha1 = replay_sha256_ascii_sha1_hashes(ascii_log)
+    sha1_ascii_skip_zero = replay_sha1_ascii_skip_zero(ascii_log)
+    sha256_binary_skip_zero = replay_sha256_binary_skip_zero(entries)
+    sha256_ascii_sha1_skip_zero = replay_sha256_ascii_sha1_skip_zero(ascii_log)
 
     print()
     print("Replay candidates:")
@@ -139,10 +186,16 @@ def main() -> int:
     print(f"sha1_ascii_match             = {sha1_ascii.pcr_hex == pcr_sha1}")
     print(f"sha1_binary_expected         = {sha1_binary.pcr_hex}")
     print(f"sha1_binary_match            = {sha1_binary.pcr_hex == pcr_sha1}")
+    print(f"sha1_ascii_skip_zero         = {sha1_ascii_skip_zero}")
+    print(f"sha1_ascii_skip_zero_match   = {sha1_ascii_skip_zero == pcr_sha1}")
     print(f"sha256_binary_expected       = {sha256_binary.pcr_hex}")
     print(f"sha256_binary_match          = {sha256_binary.pcr_hex == pcr_sha256}")
+    print(f"sha256_binary_skip_zero      = {sha256_binary_skip_zero}")
+    print(f"sha256_binary_skip_zero_match= {sha256_binary_skip_zero == pcr_sha256}")
     print(f"sha256_ascii_sha1_expected   = {sha256_ascii_sha1}")
     print(f"sha256_ascii_sha1_match      = {sha256_ascii_sha1 == pcr_sha256}")
+    print(f"sha256_ascii_sha1_skip_zero  = {sha256_ascii_sha1_skip_zero}")
+    print(f"sha256_ascii_sha1_skip_match = {sha256_ascii_sha1_skip_zero == pcr_sha256}")
 
     print()
     if sha1_ascii.pcr_hex == pcr_sha1 or sha256_binary.pcr_hex == pcr_sha256:
