@@ -320,6 +320,17 @@ def _parse_gotpm_textproto(text: str, preferred_bank: str = "sha256") -> tuple[b
     return ak_pub, quotes, cert
 
 
+def _split_certificate_blobs(value: bytes) -> list[bytes]:
+    if b"BEGIN CERTIFICATE" in value:
+        matches = re.findall(
+            rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+            value,
+            flags=re.S,
+        )
+        return list(matches) if matches else [value]
+    return [value]
+
+
 def _certificate_candidates(text: str) -> list[bytes]:
     values: list[bytes] = []
     cert_fields = re.finditer(
@@ -337,8 +348,9 @@ def _certificate_candidates(text: str) -> list[bytes]:
             value, _ = _read_proto_string(text, pos)
         except ValueError:
             continue
-        if b"BEGIN CERTIFICATE" in value or _load_certificate(value) is not None:
-            values.append(value)
+        for candidate in _split_certificate_blobs(value):
+            if b"BEGIN CERTIFICATE" in candidate or _load_certificate(candidate) is not None:
+                values.append(candidate)
     return values
 
 
@@ -510,6 +522,13 @@ def _load_certificate(blob: bytes):
         if b"BEGIN CERTIFICATE" in blob:
             return x509.load_pem_x509_certificate(blob)
         return x509.load_der_x509_certificate(blob)
+    except Exception:
+        pass
+    try:
+        decoded = base64.b64decode(blob, validate=True)
+        if b"BEGIN CERTIFICATE" in decoded:
+            return x509.load_pem_x509_certificate(decoded)
+        return x509.load_der_x509_certificate(decoded)
     except Exception:
         return None
 

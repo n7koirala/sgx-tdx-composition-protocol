@@ -66,6 +66,7 @@ from ima_rtmr3_common import (
     read_mr_hex,
     read_pcr10_sha1,
     read_pcr10_sha256,
+    replay_pcr10_sha256_binary,
     replay_rtmr3,
     rtmr_attr_path,
     write_rtmr_digest,
@@ -256,6 +257,21 @@ class CVMRTMR3Agent:
                 print(f"[RTMR3] watcher error: {exc}")
             time.sleep(self.poll_interval)
 
+
+    @staticmethod
+    def _vtpm_pcr10_hex(vtpm: dict) -> str:
+        bank = vtpm.get("vtpm_quote_bank", "sha256")
+        pcrs = vtpm.get("vtpm_pcrs", {})
+        if isinstance(pcrs, dict):
+            value = pcrs.get(bank, {}).get("10", "")
+            if value:
+                return str(value).lower()
+        raw_b64 = vtpm.get("vtpm_pcr_bin_b64", "")
+        if raw_b64:
+            raw = base64.b64decode(raw_b64)
+            return raw[:32].hex()
+        return ""
+
     def get_tdx_quote_dcap(self, nonce: str) -> Tuple[bytes, str]:
         if self._tdx_lib is None:
             raise RuntimeError("libtdx_attest not loaded")
@@ -296,7 +312,17 @@ class CVMRTMR3Agent:
             snapshot = {}
             last = None
 
+            nonce_bytes = base64.b64decode(nonce)
             for attempt in range(1, max_attempts + 1):
+                t_quote0 = time.perf_counter()
+                if self.method == METHOD_DCAP:
+                    # gotpm may itself trigger IMA measurements. Quote PCR-10 first,
+                    # then sync/read the resulting IMA log and RTMR3 chain.
+                    vtpm = self.vtpm.quote_pcr10(nonce_bytes, bank="sha256")
+                else:
+                    raise RuntimeError("ITA mode is not implemented in this RTMR3 test agent")
+                t_vtpm_ms = (time.perf_counter() - t_quote0) * 1000.0
+
                 t_sync0 = time.perf_counter()
                 ima_blob, entries, new_count = self._sync_new_entries_locked()
                 t_sync_ms = (time.perf_counter() - t_sync0) * 1000.0
@@ -305,37 +331,49 @@ class CVMRTMR3Agent:
                 ascii_count = count_ascii_ima_entries(ima_ascii_log)
                 ima_count_before = read_ima_count()
 
-                t_quote0 = time.perf_counter()
-                if self.method == METHOD_DCAP:
-                    quote_bytes, mrtd = self.get_tdx_quote_dcap(nonce)
-                    vtpm = self.vtpm.quote_pcr10(base64.b64decode(nonce), bank="sha256")
-                    raw_quote_b64 = base64.b64encode(quote_bytes).decode("ascii")
-                    token = ""
-                    attestation_method = METHOD_DCAP
-                else:
-                    raise RuntimeError("ITA mode is not implemented in this RTMR3 test agent")
-                t_quote_ms = (time.perf_counter() - t_quote0) * 1000.0
-
-                pcr10 = read_pcr10_sha1()
-                pcr10_sha256 = read_pcr10_sha256()
-                ima_count_after = read_ima_count()
-                rtmr3_current = read_mr_hex(self.rtmr3_path)
+                pcr_replay = replay_pcr10_sha256_binary(entries).pcr_hex
+                vtpm_pcr10 = self._vtpm_pcr10_hex(vtpm)
+                pcr_signed_snapshot_match = bool(vtpm_pcr10) and vtpm_pcr10 == pcr_replay
 
                 entry_count = len(entries)
                 pre_quote_consistent = (
                     ima_count_before == entry_count and
                     ascii_count == entry_count
                 )
+                evidence_consistent = pre_quote_consistent and pcr_signed_snapshot_match
+
+                if evidence_consistent:
+                    t_tdx0 = time.perf_counter()
+                    quote_bytes, mrtd = self.get_tdx_quote_dcap(nonce)
+                    raw_quote_b64 = base64.b64encode(quote_bytes).decode("ascii")
+                    token = ""
+                    attestation_method = METHOD_DCAP
+                    t_tdx_ms = (time.perf_counter() - t_tdx0) * 1000.0
+                else:
+                    quote_bytes = b""
+                    mrtd = ""
+                    raw_quote_b64 = ""
+                    token = ""
+                    attestation_method = self.method
+                    t_tdx_ms = 0.0
+
+                pcr10 = read_pcr10_sha1()
+                pcr10_sha256 = read_pcr10_sha256()
+                ima_count_after = read_ima_count()
+                rtmr3_current = read_mr_hex(self.rtmr3_path)
+
                 post_quote_drift = (
                     ima_count_after - entry_count
                     if ima_count_after >= 0 else 0
                 )
-                count_stable = pre_quote_consistent and post_quote_drift == 0
-                evidence_consistent = pre_quote_consistent
+                count_stable = evidence_consistent and post_quote_drift == 0
                 snapshot = {
                     "consistent": evidence_consistent,
                     "count_stable": count_stable,
                     "pre_quote_consistent": pre_quote_consistent,
+                    "pcr_signed_snapshot_match": pcr_signed_snapshot_match,
+                    "vtpm_pcr10_at_quote": vtpm_pcr10,
+                    "replayed_pcr10_at_snapshot": pcr_replay,
                     "post_quote_drift": post_quote_drift,
                     "attempt": attempt,
                     "max_attempts": max_attempts,
@@ -348,27 +386,33 @@ class CVMRTMR3Agent:
                 last = (
                     ima_blob, ima_ascii_log, entries, new_count, pcr10, pcr10_sha256, quote_bytes, mrtd,
                     raw_quote_b64, token, attestation_method, vtpm, t_sync_ms,
-                    t_quote_ms, rtmr3_current, ima_count_after
+                    t_vtpm_ms + t_tdx_ms, rtmr3_current, ima_count_after
                 )
 
                 if evidence_consistent:
                     if post_quote_drift:
                         print(
-                            "    [SNAPSHOT] post-quote IMA drift "
+                            "    [SNAPSHOT] post-TDX-quote IMA drift "
                             f"(attempt={attempt}, entries={entry_count}, ascii={ascii_count}, "
                             f"count_before={ima_count_before}, count_after={ima_count_after}); "
-                            "signed PCR/RTMR checks will decide consistency"
+                            "sent evidence remains bound by signed PCR and quoted RTMR"
                         )
                     break
 
                 print(
-                    "    [SNAPSHOT] unstable before quote "
+                    "    [SNAPSHOT] PCR/log not aligned "
                     f"(attempt={attempt}, entries={entry_count}, ascii={ascii_count}, "
-                    f"count_before={ima_count_before}, count_after={ima_count_after}); retrying"
+                    f"count_before={ima_count_before}, vtpm_pcr10={vtpm_pcr10[:16]}..., "
+                    f"replay={pcr_replay[:16]}...); retrying"
                 )
 
             if last is None:
                 raise RuntimeError("failed to collect attestation evidence")
+            if not snapshot.get("consistent", False):
+                raise RuntimeError(
+                    "failed to collect aligned vTPM PCR-10 / IMA / RTMR3 evidence "
+                    f"after {max_attempts} attempts; last snapshot={snapshot}"
+                )
 
             (
                 ima_blob, ima_ascii_log, entries, new_count, pcr10, pcr10_sha256, quote_bytes, mrtd,
