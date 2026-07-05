@@ -258,6 +258,8 @@ def main() -> None:
     quote_ok = bool(quote_result.verified)
     snapshot = response.get("snapshot", {})
     snapshot_ok = bool(snapshot.get("consistent", True))
+    count_stable = bool(snapshot.get("count_stable", snapshot_ok))
+    post_quote_drift = int(snapshot.get("post_quote_drift", 0) or 0)
     overall_ok = (
         quote_ok
         and rtmr3_match
@@ -276,6 +278,8 @@ def main() -> None:
         "rtmr3_match": rtmr3_match,
         "pcr10_match": pcr10_match,
         "snapshot_consistent": snapshot_ok,
+        "snapshot_count_stable": count_stable,
+        "snapshot_post_quote_drift": post_quote_drift,
         "snapshot": snapshot,
         "golden_ok": golden_ok,
         "golden_loaded": golden_loaded,
@@ -367,11 +371,14 @@ def main() -> None:
         print(f"  Quoted RTMR3:     {short(quoted_rtmr3, 48)}")
         print(f"  RTMR3 check:      {'OK' if rtmr3_match else 'MISMATCH'}")
         if snapshot:
-            print(f"  Snapshot stable:  {'OK' if snapshot_ok else 'MISMATCH'} "
+            print(f"  Snapshot input:   {'OK' if snapshot_ok else 'MISMATCH'} "
                   f"(attempt={snapshot.get('attempt')}, "
                   f"entries={snapshot.get('ima_entries')}, "
                   f"before={snapshot.get('ima_count_before')}, "
                   f"after={snapshot.get('ima_count_after')})")
+            if post_quote_drift:
+                print(f"  Post-quote drift: {post_quote_drift} new IMA entr"
+                      f"{'y' if post_quote_drift == 1 else 'ies'} after evidence capture")
         print()
         print("Signed vTPM PCR-10 quote:")
         print(f"  Quote bank:       {response.get('vtpm_quote_bank', '<missing>')}")

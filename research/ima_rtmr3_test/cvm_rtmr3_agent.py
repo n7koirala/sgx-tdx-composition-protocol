@@ -322,13 +322,21 @@ class CVMRTMR3Agent:
                 rtmr3_current = read_mr_hex(self.rtmr3_path)
 
                 entry_count = len(entries)
-                count_stable = (
+                pre_quote_consistent = (
                     ima_count_before == entry_count and
-                    ima_count_after == entry_count and
                     ascii_count == entry_count
                 )
+                post_quote_drift = (
+                    ima_count_after - entry_count
+                    if ima_count_after >= 0 else 0
+                )
+                count_stable = pre_quote_consistent and post_quote_drift == 0
+                evidence_consistent = pre_quote_consistent
                 snapshot = {
-                    "consistent": count_stable,
+                    "consistent": evidence_consistent,
+                    "count_stable": count_stable,
+                    "pre_quote_consistent": pre_quote_consistent,
+                    "post_quote_drift": post_quote_drift,
                     "attempt": attempt,
                     "max_attempts": max_attempts,
                     "ima_entries": entry_count,
@@ -343,11 +351,18 @@ class CVMRTMR3Agent:
                     t_quote_ms, rtmr3_current, ima_count_after
                 )
 
-                if count_stable:
+                if evidence_consistent:
+                    if post_quote_drift:
+                        print(
+                            "    [SNAPSHOT] post-quote IMA drift "
+                            f"(attempt={attempt}, entries={entry_count}, ascii={ascii_count}, "
+                            f"count_before={ima_count_before}, count_after={ima_count_after}); "
+                            "signed PCR/RTMR checks will decide consistency"
+                        )
                     break
 
                 print(
-                    "    [SNAPSHOT] unstable "
+                    "    [SNAPSHOT] unstable before quote "
                     f"(attempt={attempt}, entries={entry_count}, ascii={ascii_count}, "
                     f"count_before={ima_count_before}, count_after={ima_count_after}); retrying"
                 )

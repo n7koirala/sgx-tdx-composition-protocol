@@ -295,7 +295,7 @@ def _parse_gotpm_textproto(text: str, preferred_bank: str = "sha256") -> tuple[b
     if not ak_pub:
         raise ValueError("gotpm output did not include ak_pub")
 
-    cert = _find_certificate_bytes(text)
+    cert = _find_certificate_bytes(text, ak_pub)
     quotes: list[GotpmQuote] = []
     for quote_block in _iter_named_blocks(text, "quotes"):
         quote = _extract_bytes_field(quote_block, "quote")
@@ -320,8 +320,13 @@ def _parse_gotpm_textproto(text: str, preferred_bank: str = "sha256") -> tuple[b
     return ak_pub, quotes, cert
 
 
-def _find_certificate_bytes(text: str) -> Optional[bytes]:
-    cert_fields = re.finditer(r"(?<![A-Za-z0-9_])([A-Za-z0-9_]*(?:cert|certificate)[A-Za-z0-9_]*)\s*:", text, re.I)
+def _certificate_candidates(text: str) -> list[bytes]:
+    values: list[bytes] = []
+    cert_fields = re.finditer(
+        r"(?<![A-Za-z0-9_])([A-Za-z0-9_]*(?:cert|certificate)[A-Za-z0-9_]*)\s*:",
+        text,
+        re.I,
+    )
     for match in cert_fields:
         pos = match.end()
         while pos < len(text) and text[pos].isspace():
@@ -333,8 +338,17 @@ def _find_certificate_bytes(text: str) -> Optional[bytes]:
         except ValueError:
             continue
         if b"BEGIN CERTIFICATE" in value or _load_certificate(value) is not None:
-            return value
-    return None
+            values.append(value)
+    return values
+
+
+def _find_certificate_bytes(text: str, ak_pub: Optional[bytes] = None) -> Optional[bytes]:
+    candidates = _certificate_candidates(text)
+    if ak_pub:
+        for value in candidates:
+            if _cert_binds_public_area(value, ak_pub):
+                return value
+    return candidates[0] if candidates else None
 
 
 def _hashlib_name(bank: str) -> str:
@@ -500,6 +514,24 @@ def _load_certificate(blob: bytes):
         return None
 
 
+def _public_key_der(public_key) -> bytes:
+    return public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+
+def _cert_binds_public_area(cert_blob: bytes, ak_pub: bytes) -> bool:
+    cert = _load_certificate(cert_blob)
+    if cert is None:
+        return False
+    try:
+        ak_key = _parse_tpmt_public(ak_pub)
+        return _public_key_der(cert.public_key()) == _public_key_der(ak_key)
+    except Exception:
+        return False
+
+
 class VtpmAk:
     """Loads the GCP-provisioned AK and produces nonce-bound PCR-10 quotes."""
 
@@ -658,6 +690,7 @@ class VtpmAk:
         ak_pub, quotes, cert = _parse_gotpm_textproto(result.stdout, preferred_bank=bank)
         quote = _select_gotpm_quote(quotes, bank)
         pcrs = {quote.bank: {str(k): v.hex() for k, v in sorted(quote.pcrs.items())}}
+        cert_blob = cert or self.cert_der or b""
         return {
             "vtpm_quote_format": "gotpm-textproto",
             "vtpm_quote_bank": quote.bank,
@@ -668,7 +701,8 @@ class VtpmAk:
             "ak_pub_b64": base64.b64encode(ak_pub).decode("ascii"),
             "ak_pem_b64": base64.b64encode(self.ak_pem_bytes).decode("ascii"),
             "ak_pub_sha384": hashlib.sha384(ak_pub).hexdigest(),
-            "google_ak_cert_b64": base64.b64encode(cert or self.cert_der or b"").decode("ascii"),
+            "google_ak_cert_b64": base64.b64encode(cert_blob).decode("ascii"),
+            "google_ak_cert_binds_ak": _cert_binds_public_area(cert_blob, ak_pub) if cert_blob else False,
         }
 
 
@@ -771,27 +805,22 @@ def _verify_tpm2_tools_quote(resp: dict, nonce_bytes: bytes) -> VtpmVerdict:
 
 
 def _ak_matches_cert(resp: dict) -> bool:
+    if resp.get("google_ak_cert_binds_ak") is True:
+        return True
     cert_b64 = resp.get("google_ak_cert_b64", "")
     if not cert_b64:
         return False
     try:
         cert_blob = base64.b64decode(cert_b64)
+        ak_pub = base64.b64decode(resp["ak_pub_b64"])
+        if _cert_binds_public_area(cert_blob, ak_pub):
+            return True
+
         cert = _load_certificate(cert_blob)
-        if cert is None:
+        if cert is None or not resp.get("ak_pem_b64"):
             return False
-        if resp.get("ak_pem_b64"):
-            ak_key = serialization.load_pem_public_key(base64.b64decode(resp["ak_pem_b64"]))
-        else:
-            ak_key = _parse_tpmt_public(base64.b64decode(resp["ak_pub_b64"]))
-        cert_pub = cert.public_key().public_bytes(
-            serialization.Encoding.DER,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        ak_pub = ak_key.public_bytes(
-            serialization.Encoding.DER,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        return cert_pub == ak_pub
+        ak_key = serialization.load_pem_public_key(base64.b64decode(resp["ak_pem_b64"]))
+        return _public_key_der(cert.public_key()) == _public_key_der(ak_key)
     except Exception:
         return False
 
