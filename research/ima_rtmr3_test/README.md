@@ -63,16 +63,15 @@ quote.
 
 CVM side requirements:
 
-- GCP-provisioned AK available at `GCP_AK_HANDLE` (default `0x810000801`).
-- Google AK certificate readable from `GCP_AK_CERT_NV` (default `0x1c10000`).
-- `tpm2-tools` installed: `tpm2_readpublic`, `tpm2_nvread`, and `tpm2_quote`.
+- Preferred on GCP: `gotpm` installed and `sudo gotpm attest --key AK --nonce <hex> --format textproto` working.
+- Optional fallback: GCP-provisioned AK available at `GCP_AK_HANDLE` (default `0x810000801`) with `tpm2-tools`.
+- Google AK certificate readable from gotpm output or from `GCP_AK_CERT_NV` (default `0x1c10000`).
 
 WEN side requirements:
 
-- `tpm2_checkquote` installed. This is used offline; the WEN does not need a
-  TPM device for quote verification.
-- Python `cryptography` installed if `google_ak_cert_b64` is present and the
-  verifier should check that the AK public key matches the Google leaf cert.
+- For gotpm evidence, no TPM device and no `tpm2_checkquote` are required; the verifier checks the TPM quote/signature in Python.
+- Python `cryptography` installed so the verifier can check the AK signature and, when present, the Google leaf certificate key binding.
+- `tpm2_checkquote` is only needed if the CVM uses the optional tpm2-tools evidence path.
 
 If the AK is provisioned at a different persistent handle, set:
 
@@ -80,7 +79,13 @@ If the AK is provisioned at a different persistent handle, set:
 export GCP_AK_HANDLE=<handle>
 ```
 
-If the certificate is at a different NV index, set:
+If gotpm uses a different key name, set:
+
+```bash
+export GCP_AK_NAME=<name>
+```
+
+If the certificate is at a different NV index for the tpm2-tools fallback, set:
 
 ```bash
 export GCP_AK_CERT_NV=<nv-index>

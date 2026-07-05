@@ -493,6 +493,7 @@ class CVMRTMR3Agent:
         print(f"IMA binary log:  {self.ima_binary_path}")
         print(f"IMA ASCII log:   {self.ima_ascii_path}")
         print(f"RTMR[3] attr:    {self.rtmr3_path}")
+        print(f"AK source:       {self.vtpm.source}")
         print(f"AK SHA384:       {self.vtpm.ak_pub_sha384.hex()[:24]}...")
         print(f"AK cert present: {'yes' if self.vtpm.cert_der else 'no'}")
         print(f"Anchored count:  {self.anchored_count:,}")
@@ -547,6 +548,7 @@ def self_test() -> bool:
 
     try:
         vtpm = VtpmAk()
+        print(f"vTPM AK source: {vtpm.source}")
         print(f"vTPM AK SHA384: {vtpm.ak_pub_sha384.hex()}")
         print(f"Google AK cert present: {'yes' if vtpm.cert_der else 'no'}")
         checks.append(("GCP vTPM AK readable", True))

@@ -29,8 +29,6 @@ fs.mounts = [
     # /sgx-tdx contains common/protocol.py for message framing and DCAP quote checks.
     { path = "/sgx-tdx", uri = "file:{{ sgx_tdx_dir }}" },
 
-    # tpm2_checkquote is used as an offline verifier for the vTPM PCR-10 quote.
-    { path = "/usr/bin/tpm2_checkquote", uri = "file:/usr/bin/tpm2_checkquote" },
 
     { type = "tmpfs", path = "/tmp" },
 ]
@@ -59,7 +57,6 @@ sgx.trusted_files = [
     "file:{{ test_dir }}/wen_rtmr3_verifier.py",
     "file:{{ test_dir }}/ima_rtmr3_common.py",
     "file:{{ test_dir }}/vtpm_quote.py",
-    "file:/usr/bin/tpm2_checkquote",
     "file:{{ sgx_tdx_dir }}/common/",
 
     "file:/etc/ssl/certs/",
