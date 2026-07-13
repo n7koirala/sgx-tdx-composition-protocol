@@ -75,7 +75,12 @@ class SGXController:
                  cert_file: str = None, key_file: str = None,
                  ca_cert: str = None, verify_tdx_cert: bool = True,
                  refresh_interval: int = DEFAULT_REFRESH_INTERVAL,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 require_runtime: bool = True,
+                 expected_rtmr3_base: str = "auto",
+                 golden_file: str = None,
+                 require_golden: bool = False,
+                 require_ak_cert: bool = False):
         self.controller_id = controller_id
         self.port = port
         self.tdx_host = tdx_host
@@ -87,6 +92,11 @@ class SGXController:
         self.verify_tdx_cert = verify_tdx_cert
         self.refresh_interval = refresh_interval
         self.verbose = verbose
+        self.require_runtime = require_runtime
+        self.expected_rtmr3_base = expected_rtmr3_base
+        self.golden_file = golden_file
+        self.require_golden = require_golden
+        self.require_ak_cert = require_ak_cert
         self.running = False
         
         # Cached TDX verification state (protected by lock)
@@ -111,7 +121,12 @@ class SGXController:
             ca_cert=self.ca_cert,
             verify_cert=self.verify_tdx_cert,
             verbose=self.verbose,
-            method=self.method
+            method=self.method,
+            require_runtime=self.require_runtime,
+            expected_rtmr3_base=self.expected_rtmr3_base,
+            golden_file=self.golden_file,
+            require_golden=self.require_golden,
+            require_ak_cert=self.require_ak_cert
         )
     
     def log(self, msg: str):
@@ -203,6 +218,9 @@ class SGXController:
             tdx_quote_hash=quote_hash,
             tdx_tcb_status=result.tcb_status,
             tdx_is_debuggable=result.is_debuggable,
+            tdx_runtime_verdict=result.runtime_verdict,
+            tdx_ima_entry_count=result.ima_entry_count,
+            tdx_runtime_checks=result.runtime_checks,
             nonce_echo=request.nonce,
             nonce_hash=nonce_hash,
             warnings=warnings,
@@ -375,6 +393,16 @@ def main():
     
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Enable verbose output")
+    parser.add_argument("--allow-legacy-runtime", action="store_true",
+                        help="Do not require composed vTPM/RTMR3 evidence")
+    parser.add_argument("--expected-rtmr3-base", default="auto",
+                        help="'auto', 'zero', or an explicit RTMR3 base")
+    parser.add_argument("--golden-file",
+                        help="Expected MRTD/RTMR0-2 and RTMR3 base JSON")
+    parser.add_argument("--require-golden", action="store_true",
+                        help="Require the golden boot policy")
+    parser.add_argument("--require-ak-cert", action="store_true",
+                        help="Require Google AK certificate-to-key binding")
     
     args = parser.parse_args()
     
@@ -400,6 +428,11 @@ def main():
             verify_tdx_cert=not args.no_verify_tdx,
             refresh_interval=args.refresh_interval,
             verbose=args.verbose,
+            require_runtime=not args.allow_legacy_runtime,
+            expected_rtmr3_base=args.expected_rtmr3_base,
+            golden_file=args.golden_file,
+            require_golden=args.require_golden,
+            require_ak_cert=args.require_ak_cert,
         )
         controller.run()
     except KeyboardInterrupt:

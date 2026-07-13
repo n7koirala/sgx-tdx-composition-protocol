@@ -158,6 +158,17 @@ def print_result(token: ControllerToken):
         print(f"    TCB Status: {token.tdx_tcb_status}")
         print(f"    Debuggable: {token.tdx_is_debuggable}")
         print(f"    Quote hash: {token.tdx_quote_hash}")
+        print(f"    Runtime:    {token.tdx_runtime_verdict or 'N/A'}")
+        print(f"    IMA entries:{token.tdx_ima_entry_count:>11,}")
+        if token.tdx_runtime_checks:
+            failed = [
+                name for name, passed in token.tdx_runtime_checks.items()
+                if not passed
+            ]
+            print(
+                "    Runtime checks: "
+                + ("all OK" if not failed else "failed: " + ", ".join(failed))
+            )
     
     # Freshness
     if token.tdx_verification_time > 0:

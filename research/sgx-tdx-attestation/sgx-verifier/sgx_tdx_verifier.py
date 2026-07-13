@@ -53,6 +53,7 @@ from common.protocol import (
     METHOD_ITA, METHOD_DCAP, VALID_METHODS
 )
 
+from common.runtime_verifier import expand_runtime_evidence, verify_runtime_evidence
 
 class SGXTDXVerifier:
     """
@@ -68,7 +69,13 @@ class SGXTDXVerifier:
     def __init__(self, tdx_host: str, tdx_port: int,
                  ca_cert: str = None, verify_cert: bool = True,
                  client_cert: str = None, client_key: str = None,
-                 verbose: bool = False, method: str = METHOD_ITA):
+                 verbose: bool = False, method: str = METHOD_ITA,
+                 require_runtime: bool = True,
+                 expected_rtmr3_base: str = "auto",
+                 golden_file: str = None,
+                 require_golden: bool = False,
+                 require_ak_cert: bool = False,
+                 save_golden: str = None):
         self.tdx_host = tdx_host
         self.tdx_port = tdx_port
         self.ca_cert = ca_cert
@@ -77,12 +84,46 @@ class SGXTDXVerifier:
         self.client_key = client_key
         self.verbose = verbose
         self.method = method
+        self.require_runtime = require_runtime
+        self.expected_rtmr3_base = expected_rtmr3_base
+        self.require_golden = require_golden
+        self.require_ak_cert = require_ak_cert
+        self.save_golden = save_golden
+        self.golden = self._load_golden(golden_file) if golden_file else None
+        self._runtime_binary = b""
+        self._runtime_ascii = ""
+        self._runtime_entry_count = 0
     
     def log(self, msg: str):
         """Log message if verbose mode enabled"""
         if self.verbose:
             print(f"[DEBUG] {msg}")
     
+    @staticmethod
+    def _load_golden(path: str) -> dict:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def _save_observed_golden(
+        self, path: str, quote_bytes: bytes, runtime_evidence: dict
+    ) -> None:
+        from common.protocol import parse_dcap_quote
+
+        quote_info = parse_dcap_quote(quote_bytes)
+        anchor = runtime_evidence.get("anchor", {})
+        data = {
+            "mrtd": quote_info.mrtd,
+            "rtmr0": quote_info.rtmr0,
+            "rtmr1": quote_info.rtmr1,
+            "rtmr2": quote_info.rtmr2,
+            "rtmr3_base": anchor.get("rtmr3_base_before_start", ""),
+            "runtime_evidence_version": runtime_evidence.get("version", ""),
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        self.log(f"Saved observed golden measurements to {path}")
+
     def attest_tdx(self) -> VerificationResult:
         """
         Perform TDX attestation and verification.
@@ -117,7 +158,10 @@ class SGXTDXVerifier:
             
             try:
                 # Step 3: Send attestation request with method
-                request = AttestationRequest(nonce=nonce, attestation_method=self.method)
+                request = AttestationRequest(
+                    nonce=nonce, attestation_method=self.method,
+                    ima_offset=self._runtime_entry_count,
+                )
                 self.log(f"Sending attestation request (method={self.method})...")
                 send_message(tls_sock, request.to_json())
                 
@@ -131,45 +175,108 @@ class SGXTDXVerifier:
                     result.verdict = "ERROR"
                     return result
                 
-                # Step 5: Verify based on attestation method
+                # Step 5: Verify the TDX quote/token and composed runtime evidence.
                 if response.attestation_method == METHOD_DCAP:
-                    self.log(f"Received DCAP quote ({len(response.raw_quote)} bytes base64)")
+                    self.log(
+                        f"Received DCAP quote ({len(response.raw_quote)} bytes base64)"
+                    )
                     quote_bytes = base64.b64decode(response.raw_quote)
                     self.log(f"Decoded quote: {len(quote_bytes)} bytes")
                     result = verify_dcap_quote(quote_bytes, nonce, debug=self.verbose)
                     result.mrtd = response.mrtd
+
+                    if result.verified and response.runtime_evidence:
+                        expanded_evidence, full_binary, full_ascii = (
+                            expand_runtime_evidence(
+                                response.runtime_evidence,
+                                self._runtime_binary,
+                                self._runtime_ascii,
+                            )
+                        )
+                        runtime = verify_runtime_evidence(
+                            expanded_evidence,
+                            quote_bytes,
+                            nonce,
+                            expected_rtmr3_base=self.expected_rtmr3_base,
+                            golden=self.golden,
+                            require_golden=self.require_golden,
+                            require_ak_cert=self.require_ak_cert,
+                        )
+                        result.runtime_checks = runtime.checks
+                        result.runtime_details = runtime.details
+                        result.ima_verified = runtime.ok
+                        result.ima_entry_count = runtime.details.get(
+                            "ima_entries", 0
+                        )
+                        result.warnings.extend(runtime.warnings)
+
+                        if runtime.ok:
+                            if self.save_golden:
+                                self._save_observed_golden(
+                                    self.save_golden,
+                                    quote_bytes,
+                                    expanded_evidence,
+                                )
+                            self._runtime_binary = full_binary
+                            self._runtime_ascii = full_ascii
+                            self._runtime_entry_count = result.ima_entry_count
+                            result.runtime_verdict = "CLEAN"
+                            self.log(
+                                "Composed runtime evidence verified "
+                                f"(wire start={response.runtime_evidence.get('ima_start_index', 0)})"
+                            )
+                        else:
+                            result.verified = False
+                            result.verdict = "UNTRUSTED"
+                            result.runtime_verdict = "RUNTIME_VIOLATION"
+                            result.error = runtime.error
+                            self.log(
+                                f"Composed runtime verification failed: {runtime.error}"
+                            )
+                    elif result.verified and self.require_runtime:
+                        result.verified = False
+                        result.verdict = "UNTRUSTED"
+                        result.runtime_verdict = "IMA_UNAVAILABLE"
+                        result.error = "required composed runtime evidence is missing"
+                    elif result.verified:
+                        result.runtime_verdict = "IMA_UNAVAILABLE"
+                        result.warnings.append(
+                            "Composed runtime evidence was not required"
+                        )
                 else:
                     self.log(f"Received ITA token ({len(response.token)} bytes)")
                     result = self._verify_token(response.token, nonce)
                     result.mrtd = response.mrtd
-                
-                # Step 6: Verify IMA event log (Layer 2 - runtime integrity)
-                if response.ima_log and response.pcr10:
-                    self.log(f"Verifying IMA event log ({response.ima_entry_count} entries)...")
+
+                # Legacy ASCII IMA verification remains available only when the
+                # server did not provide the composed v1.1 evidence object.
+                if not response.runtime_evidence and response.ima_log and response.pcr10:
+                    self.log(
+                        f"Verifying legacy IMA log ({response.ima_entry_count} entries)..."
+                    )
                     try:
-                        ima_log_text = base64.b64decode(response.ima_log).decode('utf-8')
+                        ima_log_text = base64.b64decode(response.ima_log).decode(
+                            "utf-8"
+                        )
                         ima_valid, ima_count, ima_msg = verify_ima_log(
                             ima_log_text, response.pcr10, debug=self.verbose
                         )
                         result.ima_verified = ima_valid
                         result.ima_entry_count = ima_count
-                        
-                        if ima_valid:
-                            result.runtime_verdict = "CLEAN"
-                            self.log(f"✓ IMA verification passed: {ima_msg}")
-                        else:
-                            result.runtime_verdict = "RUNTIME_VIOLATION"
-                            result.warnings.append(f"IMA verification failed: {ima_msg}")
-                            self.log(f"✗ IMA verification failed: {ima_msg}")
-                    except Exception as e:
+                        result.runtime_verdict = (
+                            "CLEAN" if ima_valid else "RUNTIME_VIOLATION"
+                        )
+                        if not ima_valid:
+                            result.warnings.append(
+                                f"Legacy IMA verification failed: {ima_msg}"
+                            )
+                    except Exception as exc:
                         result.runtime_verdict = "IMA_ERROR"
-                        result.warnings.append(f"IMA verification error: {e}")
-                        self.log(f"✗ IMA verification error: {e}")
-                else:
+                        result.warnings.append(
+                            f"Legacy IMA verification error: {exc}"
+                        )
+                elif not response.runtime_evidence and not result.runtime_verdict:
                     result.runtime_verdict = "IMA_UNAVAILABLE"
-                    if self.verbose:
-                        self.log("IMA data not included in response")
-                
             finally:
                 tls_sock.close()
         
@@ -187,6 +294,7 @@ class SGXTDXVerifier:
             result.verdict = "ERROR"
         except Exception as e:
             result.error = str(e)
+            result.verified = False
             result.verdict = "ERROR"
         
         result.verification_time_ms = (time.time() - start_time) * 1000
@@ -353,6 +461,21 @@ def print_result(result: VerificationResult):
         icon = "✓" if passed else "✗"
         print(f"    {icon} {name}")
     
+    if result.runtime_checks:
+        print("\n  Composed Runtime Checks:")
+        for name, passed in result.runtime_checks.items():
+            icon = "✓" if passed else "✗"
+            print(f"    {icon} {name}")
+        details = result.runtime_details
+        if details:
+            print(
+                "    PCR-10 prefix: "
+                f"{details.get('pcr10_prefix_entries', '<none>')} entries"
+            )
+            print(
+                "    RTMR3 base:     "
+                f"{details.get('rtmr3_base_source', '<unknown>')}"
+            )
     if result.tcb_status:
         print(f"\n  TCB Status: {result.tcb_status}")
     
@@ -394,6 +517,24 @@ def main():
                         help=f"Attestation method: {METHOD_ITA} (cloud) or {METHOD_DCAP} (local). Default: {METHOD_ITA}")
     parser.add_argument("--json", action="store_true",
                         help="Output result as JSON")
+    parser.add_argument(
+        "--allow-legacy-runtime",
+        action="store_true",
+        help="Do not require composed vTPM/RTMR3 evidence in DCAP mode",
+    )
+    parser.add_argument(
+        "--expected-rtmr3-base",
+        default="auto",
+        help="'auto', 'zero', or an explicit 96-hex-character RTMR3 base",
+    )
+    parser.add_argument("--golden-file",
+                        help="Expected MRTD/RTMR0-2 and optional RTMR3 base JSON")
+    parser.add_argument("--save-golden",
+                        help="Save observed MRTD/RTMR0-2 and RTMR3 base JSON")
+    parser.add_argument("--require-golden", action="store_true",
+                        help="Fail unless a supplied golden file matches")
+    parser.add_argument("--require-ak-cert", action="store_true",
+                        help="Fail unless the Google AK certificate binds to ak_pub")
     
     args = parser.parse_args()
     
@@ -430,7 +571,13 @@ def main():
         client_cert=client_cert,
         client_key=client_key,
         verbose=args.verbose,
-        method=args.method
+        method=args.method,
+        require_runtime=not args.allow_legacy_runtime,
+        expected_rtmr3_base=args.expected_rtmr3_base,
+        golden_file=args.golden_file,
+        require_golden=args.require_golden,
+        require_ak_cert=args.require_ak_cert,
+        save_golden=args.save_golden
     )
     
     if args.test_network:

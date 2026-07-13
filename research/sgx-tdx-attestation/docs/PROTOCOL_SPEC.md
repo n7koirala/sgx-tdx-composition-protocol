@@ -1,6 +1,6 @@
 # SGX-TDX Hierarchical Attestation - Protocol Specification
 
-## Protocol Version: 1.0
+## Protocol Version: 1.1
 
 This document specifies the message formats and protocol flow for hierarchical TEE attestation.
 
@@ -24,7 +24,7 @@ Messages are framed with a delimiter:
 <message_bytes>\n---END---\n
 ```
 
-Maximum message size: 100 KB
+Maximum message size: 70 MB (needed for an initial full binary IMA history)
 
 ---
 
@@ -38,7 +38,9 @@ Sent from SGX Enclave to TDX Server.
 {
     "action": "attest",
     "nonce": "<base64_encoded_32_bytes>",
-    "protocol_version": "1.0",
+    "attestation_method": "dcap",
+    "ima_offset": 0,
+    "protocol_version": "1.1",
     "timestamp": 1704654321.123
 }
 ```
@@ -47,7 +49,9 @@ Sent from SGX Enclave to TDX Server.
 |-------|------|----------|-------------|
 | action | string | Yes | Must be "attest" |
 | nonce | string | Yes | Base64-encoded 32-byte random value |
-| protocol_version | string | Yes | Protocol version ("1.0") |
+| attestation_method | string | Yes | `ita` or `dcap` |
+| ima_offset | integer | No | First IMA entry requested; zero requests a full history |
+| protocol_version | string | Yes | Protocol version (`1.1`) |
 | timestamp | float | No | Unix timestamp of request |
 
 ### 2.2 AttestationResponse
@@ -58,11 +62,13 @@ Sent from TDX Server to SGX Enclave.
 ```json
 {
     "status": "success",
-    "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "attestation_method": "dcap",
     "nonce_echo": "<original_nonce>",
     "mrtd": "a5844e88897b70c318bef929ef4dfd6c...",
+    "raw_quote": "<base64_tdx_quote>",
+    "runtime_evidence": {"version": "ima-rtmr3-vtpm-v1", "...": "..."},
     "error": "",
-    "protocol_version": "1.0",
+    "protocol_version": "1.1",
     "timestamp": 1704654322.456
 }
 ```
@@ -75,7 +81,7 @@ Sent from TDX Server to SGX Enclave.
     "nonce_echo": "",
     "mrtd": "",
     "error": "Token generation failed: API rate limit exceeded",
-    "protocol_version": "1.0",
+    "protocol_version": "1.1",
     "timestamp": 1704654322.456
 }
 ```
@@ -83,7 +89,10 @@ Sent from TDX Server to SGX Enclave.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | status | string | Yes | "success" or "error" |
-| token | string | Yes* | JWT token from Intel Trust Authority |
+| attestation_method | string | Yes | `ita` or `dcap` |
+| token | string | ITA | JWT token from Intel Trust Authority |
+| raw_quote | string | DCAP | Base64-encoded nonce-bound TDX quote |
+| runtime_evidence | object | DCAP | vTPM quote, incremental IMA data, AK bind, and RTMR3 metadata |
 | nonce_echo | string | Yes* | Echo of received nonce |
 | mrtd | string | No | TD Measurement (for convenience) |
 | error | string | Yes* | Error message if status is "error" |
@@ -91,6 +100,13 @@ Sent from TDX Server to SGX Enclave.
 | timestamp | float | No | Unix timestamp of response |
 
 *Required when status matches
+
+### 2.3 DCAP Runtime Evidence
+
+In protocol 1.1, `runtime_evidence` is required by the WEN in DCAP mode. It
+contains the nonce-bound vTPM PCR-10 quote, exact AK public bytes, binary and
+ASCII IMA data, signed-prefix metadata, and RTMR[3] anchor metadata. The exact
+schema and predicate are specified in [VTPM_RTMR3_INTEGRATION.md](./VTPM_RTMR3_INTEGRATION.md).
 
 ---
 
@@ -103,7 +119,7 @@ nonce_bytes = secrets.token_bytes(32)  # 32 cryptographically random bytes
 nonce_b64 = base64.b64encode(nonce_bytes).decode('ascii')  # ~44 characters
 ```
 
-### Binding
+### ITA Binding
 
 The TDX server passes the first 32 characters of the base64 nonce to `trustauthority-cli`:
 
@@ -113,7 +129,7 @@ trustauthority-cli token --tdx -c config.json -u "<nonce[:32]>"
 
 This gets encoded as UTF-8 bytes in the TDX quote's `report_data` field.
 
-### Verification
+### ITA Verification
 
 The SGX enclave verifies nonce binding by checking if `nonce[:32].encode('utf-8')` appears in the decoded `report_data`:
 
@@ -123,6 +139,13 @@ nonce_prefix_bytes = nonce_prefix.encode('utf-8')
 report_data_bytes = bytes.fromhex(report_data)
 is_bound = nonce_prefix_bytes in report_data_bytes
 ```
+
+### DCAP Binding and Verification
+
+The decoded 32-byte nonce is placed in the TDX quote `report_data` and is also
+passed as the vTPM quote qualifying data. The WEN independently requires both
+nonce checks. A response assembled from a stale TDX quote or stale PCR quote
+therefore fails even if the IMA data itself is internally consistent.
 
 ---
 
@@ -169,9 +192,9 @@ The Intel Trust Authority JWT token contains:
 
 ---
 
-## 5. Verification Steps
+## 5. ITA Verification Steps
 
-The SGX enclave performs these verifications in order:
+For ITA mode, the SGX enclave performs these verifications in order:
 
 ### Step 1: JWT Structure
 - Token has exactly 3 parts separated by `.`
@@ -203,6 +226,21 @@ assert payload['tdx']['tdx_is_debuggable'] == False
 # Example: accept only specific MRTD
 assert payload['tdx']['tdx_mrtd'] in TRUSTED_MRTD_LIST
 ```
+
+### DCAP Composed Verification
+
+For DCAP mode, the WEN requires all of the following:
+
+1. TDX quote signature and nonce binding.
+2. Binary/ASCII IMA consistency.
+3. vTPM AK signature, nonce, PCR selection, and PCR composite validity.
+4. Consistency between the AK that signs PCR-10 and the AK hash in RTMR[3].
+5. Full IMA replay to the RTMR[3] in the TDX quote.
+6. IMA-prefix replay to the PCR-10 in the vTPM quote.
+7. Incremental offset/count continuity against enclave-held verified state.
+8. Golden boot and AK certificate policies when configured.
+
+Any required failure changes the complete DCAP verdict to `UNTRUSTED`.
 
 ---
 
@@ -238,5 +276,5 @@ assert payload['tdx']['tdx_mrtd'] in TRUSTED_MRTD_LIST
 
 ### Denial of Service
 - TLS connection timeout: 30 seconds
-- Message size limit: 100 KB
+- Message size limit: 70 MB
 - No rate limiting in current implementation

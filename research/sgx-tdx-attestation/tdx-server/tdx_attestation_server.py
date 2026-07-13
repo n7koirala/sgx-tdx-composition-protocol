@@ -48,7 +48,8 @@ from common.protocol import (
     DEFAULT_PORT, PROTOCOL_VERSION, METHOD_ITA, METHOD_DCAP, VALID_METHODS,
     parse_dcap_quote
 )
-
+from common.runtime_agent import RuntimeEvidenceAgent
+from common.ima_rtmr3 import read_ima_binary_log, read_mr_hex
 
 class TDXAttestationServer:
     """
@@ -68,7 +69,9 @@ class TDXAttestationServer:
         self.config_path = config_path
         self.ca_cert_file = ca_cert_file
         self.require_client_cert = require_client_cert
+        self.runtime_binding_enabled = enable_ima and method == METHOD_DCAP
         self.method = method
+        self.runtime_agent = None
         self.enable_ima = enable_ima
         self.running = False
         
@@ -90,10 +93,12 @@ class TDXAttestationServer:
             "successful": 0,
             "failed": 0,
             "rejected_no_cert": 0,
-            "start_time": None
+            "start_time": None,
         }
-        
+
         self._verify_setup()
+        if self.runtime_binding_enabled:
+            self.runtime_agent = RuntimeEvidenceAgent(self.get_tdx_quote_dcap)
     
     def _verify_setup(self):
         """Verify TDX and attestation dependencies are available"""
@@ -400,20 +405,40 @@ class TDXAttestationServer:
             method = self.method
             
             if method == METHOD_DCAP:
-                # DCAP mode: generate raw quote via libtdx_attest
-                quote_bytes, mrtd = self.get_tdx_quote_dcap(request.nonce)
-                
+                if self.runtime_binding_enabled:
+                    quote_bytes, mrtd, runtime_evidence = self.runtime_agent.collect(
+                        request.nonce, request.ima_offset
+                    )
+                else:
+                    quote_bytes, mrtd = self.get_tdx_quote_dcap(request.nonce)
+                    runtime_evidence = {}
+
                 response = AttestationResponse(
                     status="success",
                     nonce_echo=request.nonce,
                     mrtd=mrtd,
                     attestation_method=METHOD_DCAP,
-                    raw_quote=base64.b64encode(quote_bytes).decode('ascii'),
+                    raw_quote=base64.b64encode(quote_bytes).decode("ascii"),
+                    runtime_evidence=runtime_evidence,
                 )
+
+                if runtime_evidence:
+                    response.ima_log = runtime_evidence["ima_ascii_log_b64"]
+                    response.ima_entry_count = runtime_evidence["ima_entry_count"]
+                    response.pcr10 = runtime_evidence.get(
+                        "pcr10_sha256_debug", ""
+                    )
+                    wire_start = runtime_evidence.get("ima_start_index", 0)
+                    wire_entries = response.ima_entry_count - wire_start
+                    print(
+                        "    [RUNTIME] composed evidence: "
+                        f"{wire_entries:,} entries sent "
+                        f"(start={wire_start:,}, total={response.ima_entry_count:,}), "
+                        f"signed-prefix={runtime_evidence['snapshot'].get('vtpm_ima_prefix_entries')}"
+                    )
             else:
-                # ITA mode: get JWT token from Intel Trust Authority
                 token, mrtd = self.get_tdx_token(request.nonce)
-                
+
                 response = AttestationResponse(
                     status="success",
                     token=token,
@@ -421,9 +446,8 @@ class TDXAttestationServer:
                     mrtd=mrtd,
                     attestation_method=METHOD_ITA,
                 )
-            
             # Layer 2: Collect IMA runtime integrity data
-            if self.enable_ima:
+            if self.enable_ima and not self.runtime_binding_enabled:
                 ima_offset = getattr(request, 'ima_offset', 0)
                 ima_log_text, entry_count = self.read_ima_log(offset=ima_offset)
                 pcr10_value = self.read_pcr10()
@@ -499,6 +523,9 @@ class TDXAttestationServer:
     
     def run(self):
         """Start the attestation server with optional mTLS"""
+        if self.runtime_agent:
+            self.runtime_agent.start()
+
         # Create TLS context (with mTLS if configured)
         tls_context = create_tls_context_server(
             self.cert_file, 
@@ -534,6 +561,8 @@ class TDXAttestationServer:
                     print(f"Error: {e}")
         
         finally:
+            if self.runtime_agent:
+                self.runtime_agent.stop()
             tls_socket.close()
             self._print_stats()
     
@@ -560,6 +589,17 @@ class TDXAttestationServer:
                 ima_status = "Enabled (IMA log NOT found — measurements will be empty)"
         print(f"IMA Runtime:      {ima_status}")
         print(f"Started:          {self.stats['start_time']}")
+        if self.runtime_agent:
+            runtime = self.runtime_agent.banner_fields()
+            print(f"Runtime Evidence: {runtime['evidence_version']}")
+            print(f"IMA Binary Log:   {runtime['ima_binary_path']}")
+            print(f"RTMR[3]:          {runtime['rtmr3_path']}")
+            print(f"AK Source:        {runtime['ak_source']}")
+            print(f"AK SHA384:        {runtime['ak_sha384'][:24]}...")
+            print(
+                "AK Cert Present:  "
+                f"{'yes' if runtime['ak_cert_present'] else 'no'}"
+            )
         print("=" * 70)
         if self.require_client_cert:
             print("\n[SECURE] Only clients with valid certificates can connect.")
@@ -576,6 +616,66 @@ class TDXAttestationServer:
         if self.require_client_cert:
             print(f"Rejected (no cert): {self.stats['rejected_no_cert']}")
         print("=" * 70)
+
+
+def dcap_runtime_self_test():
+    """Check DCAP, IMA, RTMR[3], and GCP vTPM prerequisites without extending RTMR."""
+    print("=" * 70)
+    print("TDX DCAP + IMA/RTMR3/vTPM Self Test")
+    print("=" * 70)
+    checks = []
+
+    checks.append(("TDX guest device", os.path.exists("/dev/tdx_guest")))
+    lib_ok = False
+    for name in (
+        "libtdx_attest.so",
+        "libtdx_attest.so.1",
+        ctypes.util.find_library("tdx_attest"),
+    ):
+        if not name:
+            continue
+        try:
+            ctypes.CDLL(name)
+            lib_ok = True
+            break
+        except OSError:
+            continue
+    checks.append(("libtdx_attest", lib_ok))
+
+    try:
+        agent = RuntimeEvidenceAgent(lambda nonce: (b"", ""))
+        fields = agent.banner_fields()
+        ima_blob, ima_entries = read_ima_binary_log(fields["ima_binary_path"])
+        rtmr3 = read_mr_hex(fields["rtmr3_path"])
+        print(f"IMA binary log: {fields['ima_binary_path']}")
+        print(f"IMA log bytes:  {len(ima_blob):,}")
+        print(f"IMA entries:    {len(ima_entries):,}")
+        print(f"RTMR[3]:        {fields['rtmr3_path']}")
+        print(f"RTMR[3] value:  {rtmr3}")
+        print(f"AK source:      {fields['ak_source']}")
+        print(f"AK SHA384:      {fields['ak_sha384']}")
+        print(
+            "AK cert:        "
+            f"{'present' if fields['ak_cert_present'] else 'not present'}"
+        )
+        checks.extend([
+            ("IMA binary log", True),
+            ("RTMR[3] access", True),
+            ("GCP vTPM AK", True),
+        ])
+    except Exception as exc:
+        print(f"Runtime evidence setup error: {exc}")
+        checks.extend([
+            ("IMA binary log", False),
+            ("RTMR[3] access", False),
+            ("GCP vTPM AK", False),
+        ])
+
+    print("\nChecks:")
+    for label, passed in checks:
+        print(f"  {'OK  ' if passed else 'FAIL'} {label}")
+    print("=" * 70)
+    return all(passed for _, passed in checks)
 
 
 def self_test():
@@ -689,7 +789,10 @@ def main():
     args = parser.parse_args()
     
     if args.test:
-        sys.exit(0 if self_test() else 1)
+        test_ok = (
+            dcap_runtime_self_test() if args.method == METHOD_DCAP else self_test()
+        )
+        sys.exit(0 if test_ok else 1)
     
     # Resolve paths relative to script directory
     script_dir = os.path.dirname(os.path.abspath(__file__))

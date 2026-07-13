@@ -26,7 +26,8 @@ TDX_HOST ?= localhost
 TDX_PORT ?= 8443
 
 # Attestation method: ita (Intel Trust Authority) or dcap (local DCAP)
-METHOD ?= ita
+METHOD ?= dcap
+RUNTIME_ARGS ?= --expected-rtmr3-base auto
 
 # Multi-controller settings
 CONTROLLER_ID ?= ctrl-1
@@ -84,7 +85,10 @@ help:
 # ============================================================================
 
 # Step 1: Generate the manifest from template
-verifier.manifest: verifier.manifest.template sgx_tdx_verifier.py sgx_controller.py ../common/protocol.py
+verifier.manifest: verifier.manifest.template sgx_tdx_verifier.py sgx_controller.py \
+                   ../common/protocol.py ../common/ima_rtmr3.py \
+                   ../common/vtpm_quote.py ../common/runtime_agent.py \
+                   ../common/runtime_verifier.py
 	@echo "[1/2] Generating manifest (this may take a few minutes)..."
 	@echo "      Gramine is hashing all trusted files..."
 	gramine-manifest \
@@ -131,7 +135,7 @@ run-sgx: all
 		--ca-cert $(CA_CERT) \
 		--client-cert $(CLIENT_CERT) \
 		--client-key $(CLIENT_KEY) \
-		--verbose
+		--verbose $(RUNTIME_ARGS)
 
 # Run without SGX (direct mode, with mTLS)
 run-direct: verifier.manifest
@@ -145,7 +149,7 @@ run-direct: verifier.manifest
 		--ca-cert $(CA_CERT) \
 		--client-cert $(CLIENT_CERT) \
 		--client-key $(CLIENT_KEY) \
-		--verbose
+		--verbose $(RUNTIME_ARGS)
 
 # Run without Gramine at all (pure Python, for testing)
 run-python:
@@ -159,7 +163,7 @@ run-python:
 		--ca-cert ../certs/ca.crt \
 		--client-cert ../certs/sgx_client.crt \
 		--client-key ../certs/sgx_client.key \
-		--verbose
+		--verbose $(RUNTIME_ARGS)
 
 # Test network connectivity
 test-network: all
@@ -191,7 +195,7 @@ run-controller: all
 		--key /app/certs/server.key \
 		--no-verify-tdx \
 		--refresh-interval $(REFRESH_INTERVAL) \
-		--verbose
+		--verbose $(RUNTIME_ARGS)
 
 # Run controller without Gramine (pure Python, for testing)
 run-controller-python:
@@ -208,7 +212,7 @@ run-controller-python:
 		--key ../certs/server.key \
 		--no-verify-tdx \
 		--refresh-interval $(REFRESH_INTERVAL) \
-		--verbose
+		--verbose $(RUNTIME_ARGS)
 
 # ============================================================================
 # Benchmark Targets

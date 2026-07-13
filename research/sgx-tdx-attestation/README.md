@@ -4,7 +4,7 @@ A research implementation of hierarchical TEE attestation where an **SGX enclave
 
 Supports two attestation methods:
 - **ITA** — Intel Trust Authority (cloud-based JWT verification)
-- **DCAP** — Local attestation via `libtdx_attest` (ECDSA signature verification, no cloud dependency)
+- **DCAP** — Local TDX attestation plus composed vTPM PCR-10 and IMA-to-RTMR[3] runtime verification
 
 ## Overview
 
@@ -41,13 +41,18 @@ sgx-tdx-attestation/
 │   ├── SETUP_GUIDE.md              # End-to-end setup instructions
 │   ├── ARCHITECTURE.md             # System design and trust model
 │   ├── PROTOCOL_SPEC.md            # Message formats and verification
+│   ├── VTPM_RTMR3_INTEGRATION.md    # vTPM/RTMR3 design and test procedure
 │   └── TROUBLESHOOTING.md          # Common issues and solutions
 ├── certs/
 │   ├── generate_certs.sh           # TLS certificate generation
 │   ├── ca.crt / server.crt / ...   # Generated certificates
 ├── common/
 │   ├── __init__.py
-│   └── protocol.py                 # Shared protocol (messages, DCAP verification)
+│   ├── protocol.py                 # Shared protocol and DCAP verification
+│   ├── ima_rtmr3.py                # Binary IMA parsing and replay
+│   ├── vtpm_quote.py               # vTPM AK quote generation/verification
+│   ├── runtime_agent.py            # CVM RTMR3 anchor/evidence collector
+│   └── runtime_verifier.py         # WEN composed runtime predicate
 ├── tdx-server/
 │   └── tdx_attestation_server.py   # TDX attestation server (ITA + DCAP)
 ├── sgx-verifier/
@@ -66,6 +71,7 @@ For detailed setup and troubleshooting, see the [docs/](./docs/) folder:
 - **[SETUP_GUIDE.md](./docs/SETUP_GUIDE.md)** - Complete step-by-step setup instructions
 - **[ARCHITECTURE.md](./docs/ARCHITECTURE.md)** - System design, trust model, components
 - **[PROTOCOL_SPEC.md](./docs/PROTOCOL_SPEC.md)** - Message formats, nonce binding, verification
+- **[VTPM_RTMR3_INTEGRATION.md](./docs/VTPM_RTMR3_INTEGRATION.md)** - Production integration, security claims, and exact SGX test steps
 - **[TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md)** - Common issues and solutions
 
 ## Quick Start
@@ -98,8 +104,14 @@ python3 tdx_attestation_server.py --port 8443 --method ita
 **DCAP mode** (local attestation via `libtdx_attest` — no cloud dependency):
 ```bash
 cd tdx-server
-sudo python3 tdx_attestation_server.py --port 8443 --method dcap
+sudo -E python3 tdx_attestation_server.py --test --method dcap
+sudo -E python3 tdx_attestation_server.py --port 8443 --method dcap
 ```
+
+DCAP mode enables composed vTPM PCR-10 and IMA-to-RTMR[3] evidence by
+default. It requires gotpm access to the GCP AK, the binary IMA log, writable
+RTMR[3], and `python3-cryptography`. Do not restart the server on the same CVM
+boot for a clean RTMR[3] policy test.
 
 **Secure mode with mTLS (SGX enclave only):**
 ```bash
@@ -123,8 +135,14 @@ python3 sgx_tdx_verifier.py --tdx-host <TDX_IP> --tdx-port 8443 --method ita --n
 python3 sgx_tdx_verifier.py --tdx-host <TDX_IP> --tdx-port 8443 --method dcap --no-verify -v
 
 # Via Gramine SGX enclave
+make clean && make all METHOD=dcap
 make run-sgx TDX_HOST=<TDX_IP> TDX_PORT=8443 METHOD=dcap
 ```
+
+The WEN requires composed runtime evidence in DCAP mode. The default
+`--expected-rtmr3-base auto` is intended for mechanism testing. Use an
+independently provisioned golden file with `--require-golden` for boot policy
+enforcement. See [the integration guide](./docs/VTPM_RTMR3_INTEGRATION.md).
 
 ### 4. Run Multi-Controller Setup (Scalable, Fault-Tolerant)
 
@@ -219,15 +237,15 @@ The multi-controller setup enables **horizontal scalability** and **fault tolera
 2. **SGX Enclave** connects to TDX server over TLS
 3. **SGX Enclave** sends attestation request:
    ```json
-   {"action": "attest", "nonce": "<base64>", "attestation_method": "dcap", "protocol_version": "1.0"}
+   {"action": "attest", "nonce": "<base64>", "attestation_method": "dcap", "ima_offset": 0, "protocol_version": "1.1"}
    ```
-4. **TDX Server** generates quote with nonce bound in `report_data`
+4. **TDX Server** obtains a vTPM PCR-10 quote, synchronizes IMA into RTMR[3], and generates a nonce-bound TDX quote
 5. **TDX Server** responds based on method:
    - **ITA**: Obtains JWT from Intel Trust Authority → `{"token": "<JWT>", "attestation_method": "ita", ...}`
-   - **DCAP**: Returns raw quote → `{"raw_quote": "<base64>", "attestation_method": "dcap", ...}`
+   - **DCAP**: Returns the raw quote and `runtime_evidence` with the vTPM quote, incremental IMA data, AK bind, and snapshot metadata
 6. **SGX Enclave** verifies based on response method:
    - **ITA**: JWT issuer + expiry + nonce binding in `report_data`
-   - **DCAP**: ECDSA-P256 signature + nonce binding in raw quote bytes
+   - **DCAP**: TDX signature/nonce plus vTPM PCR-10, AK-to-RTMR3, IMA replay, and optional golden boot checks
 
 ### Verification Checks
 

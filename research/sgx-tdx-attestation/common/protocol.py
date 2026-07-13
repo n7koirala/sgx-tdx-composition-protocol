@@ -26,7 +26,7 @@ from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime
 
 # Protocol version for compatibility checks
-PROTOCOL_VERSION = "1.0"
+PROTOCOL_VERSION = "1.1"
 
 # Default configuration
 DEFAULT_PORT = 8443
@@ -116,6 +116,7 @@ class AttestationResponse:
     ima_log: str = ""        # Base64-encoded IMA event log (runtime integrity)
     pcr10: str = ""          # vTPM PCR 10 hex value (IMA aggregate)
     ima_entry_count: int = 0 # Number of IMA event log entries
+    runtime_evidence: Dict[str, Any] = field(default_factory=dict)
     protocol_version: str = PROTOCOL_VERSION
     timestamp: float = field(default_factory=time.time)
     
@@ -131,6 +132,7 @@ class AttestationResponse:
             "ima_log": self.ima_log,
             "pcr10": self.pcr10,
             "ima_entry_count": self.ima_entry_count,
+            "runtime_evidence": self.runtime_evidence,
             "protocol_version": self.protocol_version,
             "timestamp": self.timestamp
         })
@@ -149,6 +151,7 @@ class AttestationResponse:
             ima_log=d.get("ima_log", ""),
             pcr10=d.get("pcr10", ""),
             ima_entry_count=d.get("ima_entry_count", 0),
+            runtime_evidence=d.get("runtime_evidence", {}),
             protocol_version=d.get("protocol_version", PROTOCOL_VERSION),
             timestamp=d.get("timestamp", time.time())
         )
@@ -181,6 +184,8 @@ class VerificationResult:
     ima_verified: bool = False       # IMA log replay matched PCR 10
     ima_entry_count: int = 0         # Number of IMA entries verified
     runtime_verdict: str = ""        # "CLEAN", "RUNTIME_VIOLATION", "IMA_UNAVAILABLE"
+    runtime_checks: Dict[str, bool] = field(default_factory=dict)
+    runtime_details: Dict[str, Any] = field(default_factory=dict)
     warnings: list = field(default_factory=list)
     error: str = ""
     verification_time_ms: float = 0.0
@@ -204,6 +209,8 @@ class VerificationResult:
                 "verdict": self.runtime_verdict,
                 "ima_verified": self.ima_verified,
                 "ima_entry_count": self.ima_entry_count,
+                "checks": self.runtime_checks,
+                "details": self.runtime_details,
             },
             "warnings": self.warnings,
             "error": self.error,
@@ -948,6 +955,9 @@ class ControllerToken:
     tdx_quote_hash: str = ""       # SHA-256 of raw TDX quote (for auditability)
     tdx_tcb_status: str = ""
     tdx_is_debuggable: bool = False
+    tdx_runtime_verdict: str = ""
+    tdx_ima_entry_count: int = 0
+    tdx_runtime_checks: Dict[str, bool] = field(default_factory=dict)
     
     # End-user nonce binding
     nonce_echo: str = ""           # Echo of end-user's nonce
@@ -973,6 +983,9 @@ class ControllerToken:
             "tdx_quote_hash": self.tdx_quote_hash,
             "tdx_tcb_status": self.tdx_tcb_status,
             "tdx_is_debuggable": self.tdx_is_debuggable,
+            "tdx_runtime_verdict": self.tdx_runtime_verdict,
+            "tdx_ima_entry_count": self.tdx_ima_entry_count,
+            "tdx_runtime_checks": self.tdx_runtime_checks,
             "nonce_echo": self.nonce_echo,
             "nonce_hash": self.nonce_hash,
             "error": self.error,
@@ -996,6 +1009,9 @@ class ControllerToken:
             tdx_quote_hash=d.get("tdx_quote_hash", ""),
             tdx_tcb_status=d.get("tdx_tcb_status", ""),
             tdx_is_debuggable=d.get("tdx_is_debuggable", False),
+            tdx_runtime_verdict=d.get("tdx_runtime_verdict", ""),
+            tdx_ima_entry_count=d.get("tdx_ima_entry_count", 0),
+            tdx_runtime_checks=d.get("tdx_runtime_checks", {}),
             nonce_echo=d.get("nonce_echo", ""),
             nonce_hash=d.get("nonce_hash", ""),
             error=d.get("error", ""),
@@ -1021,6 +1037,9 @@ class ControllerToken:
                 "quote_hash": self.tdx_quote_hash,
                 "tcb_status": self.tdx_tcb_status,
                 "is_debuggable": self.tdx_is_debuggable,
+                "runtime_verdict": self.tdx_runtime_verdict,
+                "ima_entry_count": self.tdx_ima_entry_count,
+                "runtime_checks": self.tdx_runtime_checks,
             },
             "nonce_echo": self.nonce_echo,
             "nonce_hash": self.nonce_hash,
