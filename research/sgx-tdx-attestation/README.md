@@ -237,12 +237,14 @@ The multi-controller setup enables **horizontal scalability** and **fault tolera
 2. **SGX Enclave** connects to TDX server over TLS
 3. **SGX Enclave** sends attestation request:
    ```json
-   {"action": "attest", "nonce": "<base64>", "attestation_method": "dcap", "ima_offset": 0, "protocol_version": "1.1"}
+   {"action": "attest", "nonce": "<base64>", "attestation_method": "dcap", "ima_offset": 0, "protocol_version": "1.2"}
    ```
 4. **TDX Server** obtains a vTPM PCR-10 quote, synchronizes IMA into RTMR[3], and generates a nonce-bound TDX quote
 5. **TDX Server** responds based on method:
    - **ITA**: Obtains JWT from Intel Trust Authority → `{"token": "<JWT>", "attestation_method": "ita", ...}`
    - **DCAP**: Returns the raw quote and `runtime_evidence` with the vTPM quote, incremental IMA data, AK bind, and snapshot metadata
+   Runtime deltas use the prior IMA count, RTMR3 checkpoint, and CVM stream
+   epoch. See [Incremental Runtime Optimization](docs/INCREMENTAL_RUNTIME_OPTIMIZATION.md).
 6. **SGX Enclave** verifies based on response method:
    - **ITA**: JWT issuer + expiry + nonce binding in `report_data`
    - **DCAP**: TDX signature/nonce plus vTPM PCR-10, AK-to-RTMR3, IMA replay, and optional golden boot checks

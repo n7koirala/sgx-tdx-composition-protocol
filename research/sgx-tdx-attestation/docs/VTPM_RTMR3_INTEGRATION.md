@@ -2,7 +2,7 @@
 
 This document describes the integration of the tested
 `research/ima_rtmr3_test` mechanism into the main hierarchical protocol in
-`research/sgx-tdx-attestation`. The integrated protocol version is `1.1`.
+`research/sgx-tdx-attestation`. The integrated protocol version is `1.2`.
 
 The implementation is intended for the DCAP path. The CVM returns one composed
 evidence object containing a fresh TDX quote, a fresh vTPM quote over SHA-256
@@ -15,7 +15,7 @@ predicate inside a Gramine SGX enclave.
 ### Shared protocol and evidence code
 
 - `common/protocol.py`
-  - Changes the wire protocol version to `1.1`.
+  - Changes the wire protocol version to `1.2`.
   - Adds `runtime_evidence` to `AttestationResponse`.
   - Adds composed runtime checks and details to `VerificationResult`.
   - Adds the runtime verdict, IMA count, and individual runtime checks to the
@@ -167,32 +167,26 @@ The prefix rule is deliberate. It does not discard later entries:
 IMA violation rows have an all-zero logged template hash. PCR replay consumes
 them as `0xff` repeated to the selected bank width. They are never skipped.
 
-## Incremental Transfer
+## Incremental Extraction, Transfer, and Replay
 
-The first request from one `SGXTDXVerifier` uses `ima_offset = 0`. The CVM
-sends the complete binary and ASCII IMA histories. After a successful composed
-verification, the enclave records:
+Protocol 1.2 keeps the CVM binary and ASCII IMA pseudo-file descriptors open
+across rounds. The first round reads the complete list. Later synchronizations
+read runtime_measurements_count first and read only bytes available after the
+descriptors' retained positions. A no-change synchronization does not read
+either pseudo-file.
 
-```text
-verified binary history
-verified ASCII history
-verified total entry count
-```
+The WEN stores a compact rolling RTMR/PCR/count checkpoint instead of retaining
+and reparsing complete binary and ASCII histories. The checkpoint is sealed
+with a Gramine MRSIGNER-derived key and recovered after WEN process restart on
+the same SGX platform.
 
-The next request sends that count as `ima_offset`. The CVM returns:
+Each delta request includes the prior entry count, quoted RTMR3 at that count,
+and CVM stream epoch. The CVM sends a full recovery snapshot when any checkpoint
+component cannot continue exactly.
 
-```text
-ima_start_index = previous verified total
-ima_entry_count = current total
-ima_binary_log_b64 = binary events [start, total)
-ima_ascii_log_b64 = ASCII lines [start, total)
-```
-
-Inside SGX, the WEN requires `ima_start_index` to equal both of its prior
-history counts. It appends the delta, validates the declared total, performs
-the full cryptographic verification, and only then commits the new history.
-If the CVM cannot honor an offset, it sends a full snapshot with start index
-zero, which the WEN verifies as a replacement history.
+The design, seq_file complexity qualification, checkpoint schema, recovery
+rules, metrics, and large-log benchmark are documented in
+[INCREMENTAL_RUNTIME_OPTIMIZATION.md](./INCREMENTAL_RUNTIME_OPTIMIZATION.md).
 
 ## WEN Verification Predicate
 
@@ -205,8 +199,8 @@ A DCAP round is trusted only when every required check passes:
 5. The signed PCR selection/composite is valid and contains SHA-256 PCR-10.
 6. `SHA384(ak_pub)` equals both AK bind fields in the evidence.
 7. `base -> SHA384(ak_pub)` equals the reported post-AK RTMR3 value.
-8. Replaying all IMA events from that post-AK value equals quoted RTMR[3].
-9. Signed PCR-10 equals replay of an exact prefix of the same binary IMA list.
+8. The first round fully replays RTMR3; later rounds replay the delta from the sealed RTMR3 checkpoint.
+9. Signed PCR-10 equals an exact prefix reached from the full-log or rolling PCR checkpoint.
 10. The agent-reported prefix count equals the independently found count.
 11. The anchored count and quoted RTMR3 metadata cover the complete list.
 12. Golden boot and AK certificate policies pass when those policies are
@@ -232,7 +226,7 @@ the GCP AK certificate cannot be matched.
 It proves that the same fresh response contains:
 
 - A valid nonce-bound TDX quote.
-- A full IMA list that replays to quoted RTMR[3] from the accepted base.
+- A first-round full list or exact incremental continuation that replays to quoted RTMR[3].
 - An AK identity included in that RTMR3 chain.
 - A valid nonce-bound AK signature over PCR-10.
 - A signed PCR-10 value that replays from a prefix of the same IMA list.
@@ -321,7 +315,7 @@ For repeatable tests:
 
 ### 1. Update both machines
 
-Use the same commit on the CVM and WEN. The shared protocol is version `1.1`,
+Use the same commit on the CVM and WEN. The shared protocol is version `1.2`,
 and old main-protocol code does not understand the composed evidence object.
 
 ### 2. CVM self-test
@@ -350,7 +344,7 @@ Expected startup output includes:
 ```text
 [RTMR3] AK bound: SHA384(ak_pub)=...
 [RTMR3] startup anchored N entries in ... ms
-Runtime Evidence: ima-rtmr3-vtpm-v1
+Runtime Evidence: ima-rtmr3-vtpm-v2
 Waiting for attestation challenges from SGX enclave...
 ```
 
@@ -424,7 +418,7 @@ make run-controller \
 
 The first refresh transfers the full log. Later server logs should report a
 nonzero start index and only new entries sent. Every successful controller
-refresh advances the enclave-held history.
+refresh advances the SGX-sealed rolling checkpoint.
 
 ### 8. Generate and observe incremental IMA events
 
@@ -490,7 +484,7 @@ vTPM signature            OK
 vTPM nonce                OK
 AK bind consistency       OK
 AK RTMR step              OK
-full RTMR3 replay         OK
+full or delta RTMR3 replay OK
 signed PCR10 prefix       OK
 prefix count              OK
 golden/AK policy          OK or explicitly not required

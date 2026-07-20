@@ -129,6 +129,10 @@ sgx.allowed_files = [
     # These files are needed for mutual TLS authentication with TDX server
     "file:{{ app_dir }}/certs/",
 
+    # SGX-sealed rolling checkpoints. Ciphertext and authentication tags are
+    # produced inside the enclave using an MRSIGNER-derived key.
+    "file:{{ app_dir }}/runtime-state/",
+
     # Benchmark output directory — must be allowed_files (not trusted_files)
     # so the benchmark script can write results CSV from inside the enclave
     "file:{{ app_dir }}/../incremental_attestation/results_optimized_sgx.csv",

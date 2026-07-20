@@ -2,7 +2,7 @@
 
 This guide walks you through setting up and running the hierarchical attestation protocol from scratch.
 
-For the protocol 1.1 DCAP path with vTPM PCR-10 and IMA-to-RTMR[3], follow
+For the protocol 1.2 DCAP path with vTPM PCR-10 and IMA-to-RTMR[3], follow
 [VTPM_RTMR3_INTEGRATION.md](./VTPM_RTMR3_INTEGRATION.md). The ITA setup below
 remains available but does not exercise the composed runtime predicate.
 
@@ -238,7 +238,7 @@ Keep this terminal open. You should see:
 ======================================================================
 TDX Hierarchical Attestation Server
 ======================================================================
-Protocol Version: 1.1
+Protocol Version: 1.2
 Port:             8443
 TLS Certificate:  ../certs/server.crt
 Config:           /home/nkoirala/config.json

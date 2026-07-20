@@ -26,7 +26,7 @@ from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime
 
 # Protocol version for compatibility checks
-PROTOCOL_VERSION = "1.1"
+PROTOCOL_VERSION = "1.2"
 
 # Default configuration
 DEFAULT_PORT = 8443
@@ -50,6 +50,9 @@ class AttestationRequest:
     nonce: str = ""  # Base64 encoded 32-byte nonce
     attestation_method: str = METHOD_ITA  # "ita" or "dcap"
     ima_offset: int = 0  # IMA entry offset (0 = full replay, >0 = incremental delta)
+    ima_checkpoint_rtmr3: str = ""  # WEN's verified RTMR3 at ima_offset
+    runtime_epoch: str = ""  # CVM agent stream epoch from the prior round
+    stream_action: str = "continue"  # continue or reset persistent IMA readers
     protocol_version: str = PROTOCOL_VERSION
     timestamp: float = field(default_factory=time.time)
     
@@ -59,6 +62,9 @@ class AttestationRequest:
             "nonce": self.nonce,
             "attestation_method": self.attestation_method,
             "ima_offset": self.ima_offset,
+            "ima_checkpoint_rtmr3": self.ima_checkpoint_rtmr3,
+            "runtime_epoch": self.runtime_epoch,
+            "stream_action": self.stream_action,
             "protocol_version": self.protocol_version,
             "timestamp": self.timestamp
         })
@@ -71,6 +77,9 @@ class AttestationRequest:
             nonce=d.get("nonce", ""),
             attestation_method=d.get("attestation_method", METHOD_ITA),
             ima_offset=d.get("ima_offset", 0),
+            ima_checkpoint_rtmr3=d.get("ima_checkpoint_rtmr3", ""),
+            runtime_epoch=d.get("runtime_epoch", ""),
+            stream_action=d.get("stream_action", "continue"),
             protocol_version=d.get("protocol_version", PROTOCOL_VERSION),
             timestamp=d.get("timestamp", time.time())
         )
@@ -80,6 +89,12 @@ class AttestationRequest:
         if self.action != "attest":
             return False, f"Unknown action: {self.action}"
         
+        if self.stream_action not in ("continue", "reset"):
+            return False, f"Invalid stream_action: {self.stream_action}"
+
+        if self.ima_offset < 0:
+            return False, "ima_offset must not be negative"
+
         if not self.nonce:
             return False, "Missing nonce"
         

@@ -407,7 +407,11 @@ class TDXAttestationServer:
             if method == METHOD_DCAP:
                 if self.runtime_binding_enabled:
                     quote_bytes, mrtd, runtime_evidence = self.runtime_agent.collect(
-                        request.nonce, request.ima_offset
+                        request.nonce,
+                        request.ima_offset,
+                        request.ima_checkpoint_rtmr3,
+                        request.runtime_epoch,
+                        request.stream_action,
                     )
                 else:
                     quote_bytes, mrtd = self.get_tdx_quote_dcap(request.nonce)
@@ -600,6 +604,7 @@ class TDXAttestationServer:
                 "AK Cert Present:  "
                 f"{'yes' if runtime['ak_cert_present'] else 'no'}"
             )
+            print(f"IMA Reader:       {runtime['reader_mode']}")
         print("=" * 70)
         if self.require_client_cert:
             print("\n[SECURE] Only clients with valid certificates can connect.")

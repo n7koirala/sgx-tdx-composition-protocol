@@ -8,7 +8,8 @@ This directory contains documentation for the hierarchical TEE attestation proto
 |----------|-------------|
 | [SETUP_GUIDE.md](./SETUP_GUIDE.md) | **Start here** - Complete end-to-end setup instructions |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | System design, trust model, and component overview |
-| [VTPM_RTMR3_INTEGRATION.md](./VTPM_RTMR3_INTEGRATION.md) | Protocol 1.1 vTPM PCR-10, IMA-to-RTMR3 integration, policy, and SGX test steps |
+| [VTPM_RTMR3_INTEGRATION.md](./VTPM_RTMR3_INTEGRATION.md) | Protocol 1.2 vTPM PCR-10, IMA-to-RTMR3 integration, policy, and SGX test steps |
+| [INCREMENTAL_RUNTIME_OPTIMIZATION.md](./INCREMENTAL_RUNTIME_OPTIMIZATION.md) | Persistent IMA descriptors, sealed rolling checkpoints, metrics, and large-log tests |
 | [PROTOCOL_SPEC.md](./PROTOCOL_SPEC.md) | Message formats, nonce binding, and verification steps |
 | [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) | Common issues and solutions |
 

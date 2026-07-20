@@ -1,6 +1,6 @@
 # SGX-TDX Hierarchical Attestation - Protocol Specification
 
-## Protocol Version: 1.1
+## Protocol Version: 1.2
 
 This document specifies the message formats and protocol flow for hierarchical TEE attestation.
 
@@ -40,7 +40,10 @@ Sent from SGX Enclave to TDX Server.
     "nonce": "<base64_encoded_32_bytes>",
     "attestation_method": "dcap",
     "ima_offset": 0,
-    "protocol_version": "1.1",
+    "ima_checkpoint_rtmr3": "",
+    "runtime_epoch": "",
+    "stream_action": "continue",
+    "protocol_version": "1.2",
     "timestamp": 1704654321.123
 }
 ```
@@ -50,8 +53,11 @@ Sent from SGX Enclave to TDX Server.
 | action | string | Yes | Must be "attest" |
 | nonce | string | Yes | Base64-encoded 32-byte random value |
 | attestation_method | string | Yes | `ita` or `dcap` |
-| ima_offset | integer | No | First IMA entry requested; zero requests a full history |
-| protocol_version | string | Yes | Protocol version (`1.1`) |
+| ima_offset | integer | No | Prior verified IMA entry count; zero requests full evidence |
+| ima_checkpoint_rtmr3 | string | No | Quoted RTMR3 at ima_offset; required to continue a delta |
+| runtime_epoch | string | No | CVM agent epoch from the prior verified response |
+| stream_action | string | No | continue or explicit descriptor reset |
+| protocol_version | string | Yes | Protocol version (`1.2`) |
 | timestamp | float | No | Unix timestamp of request |
 
 ### 2.2 AttestationResponse
@@ -66,9 +72,9 @@ Sent from TDX Server to SGX Enclave.
     "nonce_echo": "<original_nonce>",
     "mrtd": "a5844e88897b70c318bef929ef4dfd6c...",
     "raw_quote": "<base64_tdx_quote>",
-    "runtime_evidence": {"version": "ima-rtmr3-vtpm-v1", "...": "..."},
+    "runtime_evidence": {"version": "ima-rtmr3-vtpm-v2", "...": "..."},
     "error": "",
-    "protocol_version": "1.1",
+    "protocol_version": "1.2",
     "timestamp": 1704654322.456
 }
 ```
@@ -81,7 +87,7 @@ Sent from TDX Server to SGX Enclave.
     "nonce_echo": "",
     "mrtd": "",
     "error": "Token generation failed: API rate limit exceeded",
-    "protocol_version": "1.1",
+    "protocol_version": "1.2",
     "timestamp": 1704654322.456
 }
 ```
@@ -103,10 +109,12 @@ Sent from TDX Server to SGX Enclave.
 
 ### 2.3 DCAP Runtime Evidence
 
-In protocol 1.1, `runtime_evidence` is required by the WEN in DCAP mode. It
+In protocol 1.2, `runtime_evidence` is required by the WEN in DCAP mode. It
 contains the nonce-bound vTPM PCR-10 quote, exact AK public bytes, binary and
 ASCII IMA data, signed-prefix metadata, and RTMR[3] anchor metadata. The exact
 schema and predicate are specified in [VTPM_RTMR3_INTEGRATION.md](./VTPM_RTMR3_INTEGRATION.md).
+Persistent extraction, rolling checkpoints, and restart recovery are specified
+in [INCREMENTAL_RUNTIME_OPTIMIZATION.md](./INCREMENTAL_RUNTIME_OPTIMIZATION.md).
 
 ---
 

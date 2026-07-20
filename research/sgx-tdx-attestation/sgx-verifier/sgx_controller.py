@@ -80,7 +80,11 @@ class SGXController:
                  expected_rtmr3_base: str = "auto",
                  golden_file: str = None,
                  require_golden: bool = False,
-                 require_ak_cert: bool = False):
+                 require_ak_cert: bool = False,
+                 checkpoint_file: str = None,
+                 enable_sealed_checkpoint: bool = True,
+                 reset_checkpoint: bool = False,
+                 reset_cvm_stream: bool = False):
         self.controller_id = controller_id
         self.port = port
         self.tdx_host = tdx_host
@@ -126,7 +130,12 @@ class SGXController:
             expected_rtmr3_base=self.expected_rtmr3_base,
             golden_file=self.golden_file,
             require_golden=self.require_golden,
-            require_ak_cert=self.require_ak_cert
+            require_ak_cert=self.require_ak_cert,
+            checkpoint_file=checkpoint_file,
+            checkpoint_namespace=self.controller_id,
+            enable_sealed_checkpoint=enable_sealed_checkpoint,
+            reset_checkpoint=reset_checkpoint,
+            reset_cvm_stream=reset_cvm_stream,
         )
     
     def log(self, msg: str):
@@ -403,6 +412,14 @@ def main():
                         help="Require the golden boot policy")
     parser.add_argument("--require-ak-cert", action="store_true",
                         help="Require Google AK certificate-to-key binding")
+    parser.add_argument("--checkpoint-file",
+                        help="Host path for the SGX-sealed rolling checkpoint")
+    parser.add_argument("--no-sealed-checkpoint", action="store_true",
+                        help="Keep checkpoint only in live enclave memory")
+    parser.add_argument("--reset-checkpoint", action="store_true",
+                        help="Delete the sealed checkpoint before startup")
+    parser.add_argument("--reset-cvm-stream", action="store_true",
+                        help="Ask the CVM to reopen and validate persistent IMA descriptors")
     
     args = parser.parse_args()
     
@@ -433,6 +450,10 @@ def main():
             golden_file=args.golden_file,
             require_golden=args.require_golden,
             require_ak_cert=args.require_ak_cert,
+            checkpoint_file=args.checkpoint_file,
+            enable_sealed_checkpoint=not args.no_sealed_checkpoint,
+            reset_checkpoint=args.reset_checkpoint,
+            reset_cvm_stream=args.reset_cvm_stream,
         )
         controller.run()
     except KeyboardInterrupt:

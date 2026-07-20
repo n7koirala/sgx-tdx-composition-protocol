@@ -138,18 +138,23 @@ def canonical_entry_bytes(entry: IMABinaryEntry) -> bytes:
     )
 
 
-def parse_ima_binary_log(blob: bytes) -> List[IMABinaryEntry]:
+MAX_IMA_TEMPLATE_NAME = 4096
+MAX_IMA_TEMPLATE_DATA = 64 * 1024 * 1024
+
+
+def parse_ima_binary_stream(
+    blob: bytes, *, start_index: int = 0
+) -> Tuple[List[IMABinaryEntry], int]:
+    """Parse complete events and leave a trailing partial event unconsumed."""
     entries: List[IMABinaryEntry] = []
     off = 0
-    index = 0
+    index = start_index
     size = len(blob)
 
     while off < size:
         start = off
         if size - off < 4 + 20 + 4:
-            raise IMABinaryParseError(
-                f"truncated IMA event header at byte {off} of {size}"
-            )
+            break
 
         pcr_index = struct.unpack_from("<I", blob, off)[0]
         off += 4
@@ -159,23 +164,30 @@ def parse_ima_binary_log(blob: bytes) -> List[IMABinaryEntry]:
 
         template_name_len = struct.unpack_from("<I", blob, off)[0]
         off += 4
-        if template_name_len > size - off:
+        if template_name_len > MAX_IMA_TEMPLATE_NAME:
             raise IMABinaryParseError(
-                f"bad template_name_len={template_name_len} at event {index}"
+                f"implausible template_name_len={template_name_len} "
+                f"at event {index}"
             )
+        if template_name_len > size - off:
+            off = start
+            break
         template_name = blob[off:off + template_name_len]
         off += template_name_len
 
         if size - off < 4:
-            raise IMABinaryParseError(
-                f"missing template_data_len at event {index}"
-            )
+            off = start
+            break
         template_data_len = struct.unpack_from("<I", blob, off)[0]
         off += 4
-        if template_data_len > size - off:
+        if template_data_len > MAX_IMA_TEMPLATE_DATA:
             raise IMABinaryParseError(
-                f"bad template_data_len={template_data_len} at event {index}"
+                f"implausible template_data_len={template_data_len} "
+                f"at event {index}"
             )
+        if template_data_len > size - off:
+            off = start
+            break
         template_data = blob[off:off + template_data_len]
         off += template_data_len
 
@@ -191,6 +203,15 @@ def parse_ima_binary_log(blob: bytes) -> List[IMABinaryEntry]:
         )
         index += 1
 
+    return entries, off
+
+
+def parse_ima_binary_log(blob: bytes) -> List[IMABinaryEntry]:
+    entries, consumed = parse_ima_binary_stream(blob)
+    if consumed != len(blob):
+        raise IMABinaryParseError(
+            f"truncated IMA event at byte {consumed} of {len(blob)}"
+        )
     return entries
 
 

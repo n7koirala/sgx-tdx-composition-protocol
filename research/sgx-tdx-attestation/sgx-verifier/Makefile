@@ -14,6 +14,8 @@ ARCH_LIBDIR := /lib/$(shell gcc -dumpmachine)
 
 # Application directory (parent of sgx-verifier)
 APP_DIR := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST))))..)
+CHECKPOINT_DIR := $(APP_DIR)/runtime-state/sealed-checkpoints
+BENCHMARK_RESULT_DIR := $(APP_DIR)/runtime-state/benchmark-results
 
 # Gramine signing key
 SGX_SIGNING_KEY ?= $(HOME)/.config/gramine/enclave-key.pem
@@ -43,7 +45,7 @@ CLIENT_KEY ?= /app/certs/sgx_client.key
 # Targets
 # ============================================================================
 
-.PHONY: all clean run-sgx run-direct run-controller run-controller-python test-network check-setup help
+.PHONY: all checkpoint-dir clean run-sgx run-direct run-controller run-controller-python test-network check-setup help bench-runtime-sgx
 
 # Default target
 all: verifier.manifest.sgx verifier.sig
@@ -84,11 +86,16 @@ help:
 # Build Steps
 # ============================================================================
 
+checkpoint-dir:
+	mkdir -p $(CHECKPOINT_DIR) $(BENCHMARK_RESULT_DIR)
+
 # Step 1: Generate the manifest from template
 verifier.manifest: verifier.manifest.template sgx_tdx_verifier.py sgx_controller.py \
+                   benchmark_incremental_runtime.py \
                    ../common/protocol.py ../common/ima_rtmr3.py \
-                   ../common/vtpm_quote.py ../common/runtime_agent.py \
-                   ../common/runtime_verifier.py
+                   ../common/ima_stream.py ../common/vtpm_quote.py \
+                   ../common/runtime_agent.py ../common/runtime_verifier.py \
+                   ../common/sealed_checkpoint.py | checkpoint-dir
 	@echo "[1/2] Generating manifest (this may take a few minutes)..."
 	@echo "      Gramine is hashing all trusted files..."
 	gramine-manifest \
@@ -220,6 +227,19 @@ run-controller-python:
 
 # Benchmark configuration
 ROUNDS ?= 5
+RUNTIME_ROUNDS ?= 10
+RUNTIME_INTERVAL ?= 1
+
+bench-runtime-sgx: all
+	gramine-sgx ./verifier /app/sgx-verifier/benchmark_incremental_runtime.py \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--no-verify \
+		--rounds $(RUNTIME_ROUNDS) \
+		--interval $(RUNTIME_INTERVAL) \
+		--output /app/runtime-state/benchmark-results/incremental-runtime.csv \
+		$(RUNTIME_ARGS)
+
 STRATEGY ?= both
 DELTAS ?= 100,500,1000,5000,10000
 

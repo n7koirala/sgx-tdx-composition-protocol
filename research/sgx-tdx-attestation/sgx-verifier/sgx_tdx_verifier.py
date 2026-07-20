@@ -39,6 +39,7 @@ import argparse
 import time
 import json
 import base64
+import hashlib
 from datetime import datetime
 
 # Add parent directory to path for common module
@@ -53,7 +54,11 @@ from common.protocol import (
     METHOD_ITA, METHOD_DCAP, VALID_METHODS
 )
 
-from common.runtime_verifier import expand_runtime_evidence, verify_runtime_evidence
+from common.runtime_verifier import (
+    RuntimeCheckpoint,
+    verify_runtime_incremental,
+)
+from common.sealed_checkpoint import CheckpointSealError, SealedCheckpointStore
 
 class SGXTDXVerifier:
     """
@@ -75,7 +80,12 @@ class SGXTDXVerifier:
                  golden_file: str = None,
                  require_golden: bool = False,
                  require_ak_cert: bool = False,
-                 save_golden: str = None):
+                 save_golden: str = None,
+                 checkpoint_file: str = None,
+                 checkpoint_namespace: str = "single",
+                 enable_sealed_checkpoint: bool = True,
+                 reset_checkpoint: bool = False,
+                 reset_cvm_stream: bool = False):
         self.tdx_host = tdx_host
         self.tdx_port = tdx_port
         self.ca_cert = ca_cert
@@ -90,9 +100,15 @@ class SGXTDXVerifier:
         self.require_ak_cert = require_ak_cert
         self.save_golden = save_golden
         self.golden = self._load_golden(golden_file) if golden_file else None
-        self._runtime_binary = b""
-        self._runtime_ascii = ""
-        self._runtime_entry_count = 0
+        self._runtime_checkpoint = None
+        self._checkpoint_store = None
+        self._checkpoint_warning = ""
+        self._checkpoint_context = (
+            f"{checkpoint_namespace}|{self.tdx_host}|{self.tdx_port}|{self.method}"
+        )
+        self._stream_action = "reset" if reset_cvm_stream else "continue"
+        if enable_sealed_checkpoint:
+            self._initialize_checkpoint_store(checkpoint_file, reset_checkpoint)
     
     def log(self, msg: str):
         """Log message if verbose mode enabled"""
@@ -103,6 +119,54 @@ class SGXTDXVerifier:
     def _load_golden(path: str) -> dict:
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
+
+    def _initialize_checkpoint_store(
+        self, checkpoint_file: str = None, reset: bool = False
+    ) -> None:
+        key_path = "/dev/attestation/keys/_sgx_mrsigner"
+        if not os.path.exists(key_path):
+            self._checkpoint_warning = (
+                "SGX sealing key unavailable; runtime checkpoint is volatile"
+            )
+            return
+        if not checkpoint_file:
+            digest = hashlib.sha256(
+                self._checkpoint_context.encode("utf-8")
+            ).hexdigest()[:24]
+            checkpoint_file = (
+                f"/app/runtime-state/sealed-checkpoints/{digest}.checkpoint"
+            )
+        try:
+            self._checkpoint_store = SealedCheckpointStore(
+                checkpoint_file, self._checkpoint_context, key_path=key_path
+            )
+        except CheckpointSealError as exc:
+            self._checkpoint_store = None
+            self._checkpoint_warning = f"SGX checkpoint sealing unavailable: {exc}"
+            return
+
+        if reset:
+            self._checkpoint_store.delete()
+        try:
+            value = self._checkpoint_store.load()
+            if value:
+                self._runtime_checkpoint = RuntimeCheckpoint.from_dict(value)
+                self.log(
+                    "Recovered sealed runtime checkpoint "
+                    f"(entries={self._runtime_checkpoint.entry_count}, "
+                    f"generation={self._runtime_checkpoint.generation})"
+                )
+        except (CheckpointSealError, ValueError, TypeError) as exc:
+            self._runtime_checkpoint = None
+            self._checkpoint_warning = (
+                f"sealed checkpoint could not be recovered; full replay required: {exc}"
+            )
+            self._checkpoint_store.delete()
+
+    def _commit_runtime_checkpoint(self, checkpoint: RuntimeCheckpoint) -> None:
+        if self._checkpoint_store:
+            self._checkpoint_store.save(checkpoint.to_dict())
+        self._runtime_checkpoint = checkpoint
 
     def _save_observed_golden(
         self, path: str, quote_bytes: bytes, runtime_evidence: dict
@@ -158,9 +222,14 @@ class SGXTDXVerifier:
             
             try:
                 # Step 3: Send attestation request with method
+                checkpoint = self._runtime_checkpoint
                 request = AttestationRequest(
-                    nonce=nonce, attestation_method=self.method,
-                    ima_offset=self._runtime_entry_count,
+                    nonce=nonce,
+                    attestation_method=self.method,
+                    ima_offset=checkpoint.entry_count if checkpoint else 0,
+                    ima_checkpoint_rtmr3=checkpoint.rtmr3 if checkpoint else "",
+                    runtime_epoch=checkpoint.stream_epoch if checkpoint else "",
+                    stream_action=self._stream_action,
                 )
                 self.log(f"Sending attestation request (method={self.method})...")
                 send_message(tls_sock, request.to_json())
@@ -169,6 +238,7 @@ class SGXTDXVerifier:
                 self.log("Waiting for response...")
                 response_json = receive_message(tls_sock)
                 response = AttestationResponse.from_json(response_json)
+                self._stream_action = "continue"
                 
                 if response.status != "success":
                     result.error = f"TDX server error: {response.error}"
@@ -186,17 +256,11 @@ class SGXTDXVerifier:
                     result.mrtd = response.mrtd
 
                     if result.verified and response.runtime_evidence:
-                        expanded_evidence, full_binary, full_ascii = (
-                            expand_runtime_evidence(
-                                response.runtime_evidence,
-                                self._runtime_binary,
-                                self._runtime_ascii,
-                            )
-                        )
-                        runtime = verify_runtime_evidence(
-                            expanded_evidence,
+                        runtime, next_checkpoint = verify_runtime_incremental(
+                            response.runtime_evidence,
                             quote_bytes,
                             nonce,
+                            self._runtime_checkpoint,
                             expected_rtmr3_base=self.expected_rtmr3_base,
                             golden=self.golden,
                             require_golden=self.require_golden,
@@ -215,15 +279,25 @@ class SGXTDXVerifier:
                                 self._save_observed_golden(
                                     self.save_golden,
                                     quote_bytes,
-                                    expanded_evidence,
+                                    response.runtime_evidence,
                                 )
-                            self._runtime_binary = full_binary
-                            self._runtime_ascii = full_ascii
-                            self._runtime_entry_count = result.ima_entry_count
+                            if next_checkpoint is None:
+                                raise RuntimeError(
+                                    "runtime verification passed without a checkpoint"
+                                )
+                            self._commit_runtime_checkpoint(next_checkpoint)
+                            result.runtime_details["checkpoint"] = {
+                                "sealed": self._checkpoint_store is not None,
+                                "generation": next_checkpoint.generation,
+                                "entry_count": next_checkpoint.entry_count,
+                                "continuity_sha256": next_checkpoint.continuity_sha256,
+                            }
                             result.runtime_verdict = "CLEAN"
                             self.log(
                                 "Composed runtime evidence verified "
-                                f"(wire start={response.runtime_evidence.get('ima_start_index', 0)})"
+                                f"(mode={runtime.details.get('verification_mode')}, "
+                                f"wire start={response.runtime_evidence.get('ima_start_index', 0)}, "
+                                f"wire entries={runtime.details.get('wire_ima_entries', 0)})"
                             )
                         else:
                             result.verified = False
@@ -249,7 +323,7 @@ class SGXTDXVerifier:
                     result.mrtd = response.mrtd
 
                 # Legacy ASCII IMA verification remains available only when the
-                # server did not provide the composed v1.1 evidence object.
+                # server did not provide the composed runtime evidence object.
                 if not response.runtime_evidence and response.ima_log and response.pcr10:
                     self.log(
                         f"Verifying legacy IMA log ({response.ima_entry_count} entries)..."
@@ -297,6 +371,8 @@ class SGXTDXVerifier:
             result.verified = False
             result.verdict = "ERROR"
         
+        if self._checkpoint_warning:
+            result.warnings.append(self._checkpoint_warning)
         result.verification_time_ms = (time.time() - start_time) * 1000
         return result
     
@@ -476,6 +552,32 @@ def print_result(result: VerificationResult):
                 "    RTMR3 base:     "
                 f"{details.get('rtmr3_base_source', '<unknown>')}"
             )
+            print(
+                "    Runtime replay: "
+                f"{details.get('verification_mode', '<unknown>')} "
+                f"({details.get('wire_ima_entries', 0)} wire entries)"
+            )
+            stream = details.get("agent_stream", {})
+            if stream:
+                pseudo_bytes = (
+                    int(stream.get("binary_bytes_read", 0))
+                    + int(stream.get("ascii_bytes_read", 0))
+                )
+                print(
+                    "    IMA extraction: "
+                    f"persistent-fd gen={stream.get('fd_generation', '?')}, "
+                    f"delta={stream.get('delta_entries', '?')}, "
+                    f"bytes={pseudo_bytes}, "
+                    f"read={float(stream.get('total_ms', 0.0)):.3f}ms, "
+                    f"count-only={bool(stream.get('fast_path', False))}"
+                )
+            checkpoint = details.get("checkpoint", {})
+            if checkpoint:
+                print(
+                    "    WEN checkpoint: "
+                    f"{'sealed' if checkpoint.get('sealed') else 'volatile'}, "
+                    f"generation={checkpoint.get('generation', '?')}"
+                )
     if result.tcb_status:
         print(f"\n  TCB Status: {result.tcb_status}")
     
@@ -535,6 +637,14 @@ def main():
                         help="Fail unless a supplied golden file matches")
     parser.add_argument("--require-ak-cert", action="store_true",
                         help="Fail unless the Google AK certificate binds to ak_pub")
+    parser.add_argument("--checkpoint-file",
+                        help="Host path for the SGX-sealed rolling checkpoint")
+    parser.add_argument("--no-sealed-checkpoint", action="store_true",
+                        help="Keep the rolling checkpoint only in enclave memory")
+    parser.add_argument("--reset-checkpoint", action="store_true",
+                        help="Delete the sealed checkpoint before attesting")
+    parser.add_argument("--reset-cvm-stream", action="store_true",
+                        help="Ask the CVM agent to reopen and validate its IMA descriptors")
     
     args = parser.parse_args()
     
@@ -577,7 +687,11 @@ def main():
         golden_file=args.golden_file,
         require_golden=args.require_golden,
         require_ak_cert=args.require_ak_cert,
-        save_golden=args.save_golden
+        save_golden=args.save_golden,
+        checkpoint_file=args.checkpoint_file,
+        enable_sealed_checkpoint=not args.no_sealed_checkpoint,
+        reset_checkpoint=args.reset_checkpoint,
+        reset_cvm_stream=args.reset_cvm_stream,
     )
     
     if args.test_network:
