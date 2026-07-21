@@ -32,6 +32,7 @@ import re
 import struct
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -44,6 +45,12 @@ GCP_AK_HANDLE = os.environ.get("GCP_AK_HANDLE", "0x810000801")
 GCP_AK_CERT_NV = os.environ.get("GCP_AK_CERT_NV", "0x1c10000")
 GCP_AK_NAME = os.environ.get("GCP_AK_NAME", "AK")
 TPM2TOOLS_TCTI = os.environ.get("TPM2TOOLS_TCTI", "device:/dev/tpmrm0")
+GOTPM_ATTEST_ATTEMPTS = max(
+    1, int(os.environ.get("GOTPM_ATTEST_ATTEMPTS", "5"))
+)
+GOTPM_ATTEST_BACKOFF_SECONDS = max(
+    0.0, float(os.environ.get("GOTPM_ATTEST_BACKOFF_SECONDS", "0.1"))
+)
 
 RTMR_DIGEST_LEN = 48
 PCR_SHA256_LEN = 32
@@ -105,6 +112,50 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     elif os.path.basename(cmd[0]).startswith("tpm2_"):
         env.setdefault("TPM2TOOLS_TCTI", TPM2TOOLS_TCTI)
     return subprocess.run(cmd, capture_output=True, check=True, env=env, **kw)
+
+
+def _output_text(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return str(value or "").strip()
+
+
+def _run_gotpm_attest(
+    ak_name: str, nonce_hex: str
+) -> tuple[subprocess.CompletedProcess, int]:
+    command = [
+        "gotpm",
+        "attest",
+        "--key",
+        ak_name,
+        "--nonce",
+        nonce_hex,
+        "--format",
+        "textproto",
+    ]
+    last_error: Optional[subprocess.CalledProcessError] = None
+    for attempt in range(1, GOTPM_ATTEST_ATTEMPTS + 1):
+        try:
+            return _run(command, text=True), attempt
+        except FileNotFoundError:
+            raise
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if attempt < GOTPM_ATTEST_ATTEMPTS:
+                delay = GOTPM_ATTEST_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                time.sleep(delay)
+
+    if last_error is None:
+        raise RuntimeError("gotpm attest failed without an exception")
+
+    stderr = _output_text(last_error.stderr)
+    stdout = _output_text(last_error.stdout)
+    detail = stderr or stdout or "gotpm produced no diagnostic output"
+    raise RuntimeError(
+        "gotpm attest failed after "
+        f"{GOTPM_ATTEST_ATTEMPTS} attempts (exit={last_error.returncode}): "
+        f"{detail[:1000]}"
+    ) from last_error
 
 
 def rtmr_extend(base: bytes, digest48: bytes) -> bytes:
@@ -614,17 +665,10 @@ class VtpmAk:
 
     def _load_provisioned_ak_gotpm(self) -> bool:
         try:
-            result = _run([
-                "gotpm",
-                "attest",
-                "--key",
-                self.ak_name,
-                "--nonce",
-                os.urandom(20).hex(),
-                "--format",
-                "textproto",
-            ], text=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
+            result, _ = _run_gotpm_attest(
+                self.ak_name, os.urandom(20).hex()
+            )
+        except (RuntimeError, FileNotFoundError):
             return False
 
         ak_pub, quotes, cert = _parse_gotpm_textproto(result.stdout)
@@ -683,6 +727,7 @@ class VtpmAk:
             pcr_bytes = f.read()
         return {
             "vtpm_quote_format": "tpm2-tools",
+            "vtpm_quote_attempts": 1,
             "vtpm_quote_bank": bank,
             "vtpm_quote_msg_b64": base64.b64encode(msg_bytes).decode("ascii"),
             "vtpm_quote_sig_b64": base64.b64encode(sig_bytes).decode("ascii"),
@@ -696,22 +741,19 @@ class VtpmAk:
 
     def _quote_pcr10_gotpm(self, nonce_bytes: bytes, bank: str) -> dict:
         nonce_arg = nonce_bytes.hex()
-        result = _run([
-            "gotpm",
-            "attest",
-            "--key",
-            self.ak_name,
-            "--nonce",
-            nonce_arg,
-            "--format",
-            "textproto",
-        ], text=True)
+        result, attempts = _run_gotpm_attest(self.ak_name, nonce_arg)
+        if attempts > 1:
+            print(
+                f"[vTPM] gotpm attest succeeded on attempt "
+                f"{attempts}/{GOTPM_ATTEST_ATTEMPTS}"
+            )
         ak_pub, quotes, cert = _parse_gotpm_textproto(result.stdout, preferred_bank=bank)
         quote = _select_gotpm_quote(quotes, bank)
         pcrs = {quote.bank: {str(k): v.hex() for k, v in sorted(quote.pcrs.items())}}
         cert_blob = cert or self.cert_der or b""
         return {
             "vtpm_quote_format": "gotpm-textproto",
+            "vtpm_quote_attempts": attempts,
             "vtpm_quote_bank": quote.bank,
             "vtpm_quote_msg_b64": base64.b64encode(quote.quote).decode("ascii"),
             "vtpm_quote_sig_b64": base64.b64encode(quote.signature).decode("ascii"),

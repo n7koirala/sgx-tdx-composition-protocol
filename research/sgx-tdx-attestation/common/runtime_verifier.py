@@ -301,6 +301,7 @@ def verify_runtime_evidence(
             "ak_pub_sha384": vtpm.ak_sha384,
             "ak_cert_binds_ak": vtpm.cert_binds_ak,
             "vtpm_detail": vtpm.detail,
+            "vtpm_quote_attempts": int(evidence.get("vtpm_quote_attempts", 1)),
             "rtmr3_base": rtmr3_base.hex(),
             "rtmr3_base_source": base_source,
             "rtmr3_after_ak": base_after_ak.hex(),
@@ -537,6 +538,7 @@ def _verify_runtime_delta(
             "ak_pub_sha384": vtpm.ak_sha384,
             "ak_cert_binds_ak": vtpm.cert_binds_ak,
             "vtpm_detail": vtpm.detail,
+            "vtpm_quote_attempts": int(evidence.get("vtpm_quote_attempts", 1)),
             "rtmr3_base": prior.rtmr3_base,
             "rtmr3_base_source": (
                 f"sealed WEN checkpoint; current policy: {base_source}"
