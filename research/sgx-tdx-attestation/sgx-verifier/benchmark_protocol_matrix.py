@@ -2,7 +2,7 @@
 """Run the Protocol 1.2 vTPM/RTMR3 incremental-attestation matrix.
 
 The same driver runs either inside Gramine SGX or as ordinary Python. It
-establishes a fresh verifier checkpoint at each nominal baseline, prompts for
+establishes a verifier checkpoint at the first baseline and advances it across baselines, prompts for
 a controlled CVM-side IMA update, performs the complete composed-evidence
 verification, and writes one chart-compatible CSV row per measured round.
 
@@ -184,9 +184,9 @@ def result_row(
     }
 
 
-def build_verifier(args, baseline, reset_checkpoint):
+def build_verifier(args, reset_checkpoint):
     namespace = (
-        f"protocol-1.2-matrix|{args.mode}|N={baseline}|"
+        f"protocol-1.2-matrix|{args.mode}|"
         f"{'sgx' if is_sgx() else 'python'}"
     )
     return SGXTDXVerifier(
@@ -236,7 +236,7 @@ def print_dry_run(args, label):
     print(f"  deltas:    {args.deltas}")
     print(f"  repeats:   {args.repeats}")
     print(f"  rows:      {len(args.baselines) * len(args.deltas) * args.repeats}")
-    print("  Each baseline performs one unrecorded full checkpoint round.")
+    print("  Baseline setup rounds are unrecorded; only the first is a full replay.")
     print("  Each measured row verifies DCAP + vTPM + AK/RTMR3 + PCR-10.")
 
 
@@ -304,6 +304,7 @@ def main():
     print("Baseline rounds are not written to the result CSV.")
 
     rows = 0
+    verifier = build_verifier(args, reset_checkpoint=True)
     for baseline in args.baselines:
         prompt(
             f"Prepare nominal IMA baseline N={baseline:,}.",
@@ -312,7 +313,6 @@ def main():
             args.non_interactive,
         )
 
-        verifier = build_verifier(args, baseline, reset_checkpoint=True)
         baseline_result = verifier.attest_tdx()
         require_success(baseline_result, f"baseline N={baseline}")
         baseline_actual = int(

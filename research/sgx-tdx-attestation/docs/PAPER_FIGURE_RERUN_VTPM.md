@@ -233,6 +233,7 @@ make bench-matrix-sgx \
   MATRIX_REPEATS=1
 ```
 
-Use the same matrix values for all three conditions. The driver performs one
-unrecorded full replay at each baseline to establish a valid WEN checkpoint;
-only subsequent incremental rounds are written to the CSV.
+Use the same matrix values for all three conditions. The driver performs one unrecorded checkpoint synchronization at each baseline.
+Only the first baseline requires a full replay; later baseline transitions reuse
+the verified WEN checkpoint and transfer only intervening entries. Measured
+update rounds are then written to the CSV.

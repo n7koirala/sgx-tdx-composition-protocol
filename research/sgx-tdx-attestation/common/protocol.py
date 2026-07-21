@@ -16,6 +16,7 @@ Attestation Methods:
 """
 
 import json
+import os
 import struct
 import base64
 import secrets
@@ -456,33 +457,54 @@ def create_tls_context_client(ca_cert_file: str = None,
 
 # Message framing for TCP stream
 MESSAGE_DELIMITER = b'\n---END---\n'
+DEFAULT_MAX_MESSAGE_BYTES = 256 * 1024 * 1024
+MAX_MESSAGE_BYTES = max(
+    1, int(os.environ.get("PROTOCOL_MAX_MESSAGE_BYTES", DEFAULT_MAX_MESSAGE_BYTES))
+)
+
 
 def send_message(sock, message: str):
-    """Send a framed message over socket"""
-    sock.settimeout(120)  # 120s timeout for large IMA log sends
-    data = message.encode('utf-8') + MESSAGE_DELIMITER
-    sock.sendall(data)
+    """Send one bounded delimiter-framed UTF-8 message."""
+    payload = message.encode("utf-8")
+    if len(payload) > MAX_MESSAGE_BYTES:
+        raise ProtocolError(
+            f"Message too large: {len(payload):,} bytes exceeds "
+            f"{MAX_MESSAGE_BYTES:,}-byte limit"
+        )
+    sock.settimeout(120)
+    sock.sendall(payload + MESSAGE_DELIMITER)
+
 
 def receive_message(sock, timeout: float = 120.0) -> str:
-    """Receive a framed message from socket (memory-efficient for SGX)"""
+    """Receive one bounded message with a linear-time delimiter scan."""
     sock.settimeout(timeout)
-    # Use bytearray for O(1) appends instead of bytes += which copies every time
     buffer = bytearray()
-    while MESSAGE_DELIMITER not in buffer:
-        chunk = sock.recv(65536)  # 64KB recv buffer
+    delimiter_size = len(MESSAGE_DELIMITER)
+
+    while True:
+        previous_size = len(buffer)
+        chunk = sock.recv(65536)
         if not chunk:
             break
         buffer.extend(chunk)
-        if len(buffer) > 70_000_000:  # 70MB max
-            raise ProtocolError("Message too large")
-    
-    buf_bytes = bytes(buffer)
-    del buffer  # Free the bytearray immediately
-    
-    if MESSAGE_DELIMITER in buf_bytes:
-        message, _ = buf_bytes.split(MESSAGE_DELIMITER, 1)
-        return message.decode('utf-8')
-    
+
+        search_from = max(0, previous_size - delimiter_size + 1)
+        delimiter_index = buffer.find(MESSAGE_DELIMITER, search_from)
+        if delimiter_index >= 0:
+            if delimiter_index > MAX_MESSAGE_BYTES:
+                raise ProtocolError(
+                    f"Message too large: {delimiter_index:,} bytes exceeds "
+                    f"{MAX_MESSAGE_BYTES:,}-byte limit"
+                )
+            del buffer[delimiter_index:]
+            return buffer.decode("utf-8")
+
+        if len(buffer) > MAX_MESSAGE_BYTES + delimiter_size - 1:
+            raise ProtocolError(
+                f"Message too large: received more than "
+                f"{MAX_MESSAGE_BYTES:,} bytes without a delimiter"
+            )
+
     raise ProtocolError("Incomplete message received")
 
 
