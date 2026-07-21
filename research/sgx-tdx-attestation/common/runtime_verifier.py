@@ -309,6 +309,7 @@ def verify_runtime_evidence(
             "snapshot": snapshot,
             "stream": stream,
             "agent_stream": stream.get("sync", {}),
+            "agent_timing": evidence.get("timing", {}),
             "golden_checks": per_register_golden,
             "boot_measurements": {
                 "mrtd": quote_info.mrtd.lower(),
@@ -546,6 +547,7 @@ def _verify_runtime_delta(
             "snapshot": snapshot,
             "stream": stream,
             "agent_stream": stream.get("sync", {}),
+            "agent_timing": evidence.get("timing", {}),
             "golden_checks": per_register_golden,
             "boot_measurements": boot,
             "checkpoint_generation": prior.generation,

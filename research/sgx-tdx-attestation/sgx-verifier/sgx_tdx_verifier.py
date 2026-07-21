@@ -196,16 +196,30 @@ class SGXTDXVerifier:
             VerificationResult with verdict and details
         """
         result = VerificationResult()
-        start_time = time.time()
+        start_time = time.perf_counter()
+        phase_timing = {
+            "nonce_ms": 0.0,
+            "tls_connect_ms": 0.0,
+            "request_send_ms": 0.0,
+            "response_receive_ms": 0.0,
+            "dcap_verify_ms": 0.0,
+            "runtime_verify_ms": 0.0,
+            "checkpoint_commit_ms": 0.0,
+        }
         
         try:
             # Step 1: Generate nonce
             self.log("Generating nonce...")
+            phase_started = time.perf_counter()
             nonce = generate_nonce()
+            phase_timing["nonce_ms"] = (
+                time.perf_counter() - phase_started
+            ) * 1000.0
             self.log(f"Nonce: {nonce[:16]}...")
             
             # Step 2: Create TLS connection (with mTLS if client cert provided)
             self.log(f"Connecting to {self.tdx_host}:{self.tdx_port}...")
+            phase_started = time.perf_counter()
             tls_context = create_tls_context_client(
                 ca_cert_file=self.ca_cert,
                 client_cert_file=self.client_cert,
@@ -218,6 +232,9 @@ class SGXTDXVerifier:
             
             tls_sock = tls_context.wrap_socket(sock, server_hostname=self.tdx_host)
             tls_sock.connect((self.tdx_host, self.tdx_port))
+            phase_timing["tls_connect_ms"] = (
+                time.perf_counter() - phase_started
+            ) * 1000.0
             self.log("TLS connection established")
             
             try:
@@ -232,11 +249,22 @@ class SGXTDXVerifier:
                     stream_action=self._stream_action,
                 )
                 self.log(f"Sending attestation request (method={self.method})...")
+                phase_started = time.perf_counter()
                 send_message(tls_sock, request.to_json())
+                phase_timing["request_send_ms"] = (
+                    time.perf_counter() - phase_started
+                ) * 1000.0
                 
                 # Step 4: Receive response
                 self.log("Waiting for response...")
+                phase_started = time.perf_counter()
                 response_json = receive_message(tls_sock)
+                phase_timing["response_receive_ms"] = (
+                    time.perf_counter() - phase_started
+                ) * 1000.0
+                phase_timing["response_json_bytes"] = len(
+                    response_json.encode("utf-8")
+                )
                 response = AttestationResponse.from_json(response_json)
                 self._stream_action = "continue"
                 
@@ -252,10 +280,15 @@ class SGXTDXVerifier:
                     )
                     quote_bytes = base64.b64decode(response.raw_quote)
                     self.log(f"Decoded quote: {len(quote_bytes)} bytes")
+                    phase_started = time.perf_counter()
                     result = verify_dcap_quote(quote_bytes, nonce, debug=self.verbose)
+                    phase_timing["dcap_verify_ms"] = (
+                        time.perf_counter() - phase_started
+                    ) * 1000.0
                     result.mrtd = response.mrtd
 
                     if result.verified and response.runtime_evidence:
+                        phase_started = time.perf_counter()
                         runtime, next_checkpoint = verify_runtime_incremental(
                             response.runtime_evidence,
                             quote_bytes,
@@ -266,6 +299,9 @@ class SGXTDXVerifier:
                             require_golden=self.require_golden,
                             require_ak_cert=self.require_ak_cert,
                         )
+                        phase_timing["runtime_verify_ms"] = (
+                            time.perf_counter() - phase_started
+                        ) * 1000.0
                         result.runtime_checks = runtime.checks
                         result.runtime_details = runtime.details
                         result.ima_verified = runtime.ok
@@ -285,7 +321,11 @@ class SGXTDXVerifier:
                                 raise RuntimeError(
                                     "runtime verification passed without a checkpoint"
                                 )
+                            phase_started = time.perf_counter()
                             self._commit_runtime_checkpoint(next_checkpoint)
+                            phase_timing["checkpoint_commit_ms"] = (
+                                time.perf_counter() - phase_started
+                            ) * 1000.0
                             result.runtime_details["checkpoint"] = {
                                 "sealed": self._checkpoint_store is not None,
                                 "generation": next_checkpoint.generation,
@@ -373,7 +413,16 @@ class SGXTDXVerifier:
         
         if self._checkpoint_warning:
             result.warnings.append(self._checkpoint_warning)
-        result.verification_time_ms = (time.time() - start_time) * 1000
+        result.verification_time_ms = (
+            time.perf_counter() - start_time
+        ) * 1000.0
+        phase_timing["total_ms"] = result.verification_time_ms
+        if result.runtime_details is None:
+            result.runtime_details = {}
+        result.runtime_details["timing"] = {
+            name: round(value, 6) if isinstance(value, float) else value
+            for name, value in phase_timing.items()
+        }
         return result
     
     def _verify_token(self, token: str, expected_nonce: str) -> VerificationResult:

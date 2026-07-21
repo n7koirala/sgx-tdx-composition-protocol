@@ -45,7 +45,9 @@ CLIENT_KEY ?= /app/certs/sgx_client.key
 # Targets
 # ============================================================================
 
-.PHONY: all checkpoint-dir clean run-sgx run-direct run-controller run-controller-python test-network check-setup help bench-runtime-sgx
+.PHONY: all checkpoint-dir clean run-sgx run-direct run-controller \
+	run-controller-python test-network check-setup help bench-runtime-sgx \
+	bench-matrix-non-optimized bench-matrix-python bench-matrix-sgx
 
 # Default target
 all: verifier.manifest.sgx verifier.sig
@@ -66,6 +68,11 @@ help:
 	@echo "Run Targets (multi-controller):"
 	@echo "  run-controller         - Run long-lived controller (SGX, serves end-users)"
 	@echo "  run-controller-python  - Run controller in pure Python (no Gramine)"
+	@echo ""
+	@echo "Protocol 1.2 paper benchmarks:"
+	@echo "  bench-matrix-non-optimized - Reopen/reparse control in Python"
+	@echo "  bench-matrix-python        - Persistent-FD verifier in Python"
+	@echo "  bench-matrix-sgx           - Persistent-FD verifier in Gramine SGX"
 	@echo ""
 	@echo "Setup:"
 	@echo "  check-setup   - Verify SGX and Gramine setup"
@@ -92,6 +99,7 @@ checkpoint-dir:
 # Step 1: Generate the manifest from template
 verifier.manifest: verifier.manifest.template sgx_tdx_verifier.py sgx_controller.py \
                    benchmark_incremental_runtime.py \
+		   benchmark_protocol_matrix.py \
                    ../common/protocol.py ../common/ima_rtmr3.py \
                    ../common/ima_stream.py ../common/vtpm_quote.py \
                    ../common/runtime_agent.py ../common/runtime_verifier.py \
@@ -229,6 +237,47 @@ run-controller-python:
 ROUNDS ?= 5
 RUNTIME_ROUNDS ?= 10
 RUNTIME_INTERVAL ?= 1
+MATRIX_BASELINES ?= 10000,50000,100000,200000
+MATRIX_DELTAS ?= 100,500,1000,5000,10000,15000
+MATRIX_REPEATS ?= 1
+MATRIX_ARGS ?= --expected-rtmr3-base auto
+
+bench-matrix-non-optimized: checkpoint-dir
+	PYTHONPATH=$(APP_DIR) python3 benchmark_protocol_matrix.py \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--mode non_optimized \
+		--no-verify \
+		--baselines $(MATRIX_BASELINES) \
+		--deltas $(MATRIX_DELTAS) \
+		--repeats $(MATRIX_REPEATS) \
+		--output $(BENCHMARK_RESULT_DIR)/results_vtpm_non_optimized.csv \
+		$(MATRIX_ARGS)
+
+bench-matrix-python: checkpoint-dir
+	PYTHONPATH=$(APP_DIR) python3 benchmark_protocol_matrix.py \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--mode optimized \
+		--no-verify \
+		--baselines $(MATRIX_BASELINES) \
+		--deltas $(MATRIX_DELTAS) \
+		--repeats $(MATRIX_REPEATS) \
+		--output $(BENCHMARK_RESULT_DIR)/results_vtpm_optimized_python.csv \
+		$(MATRIX_ARGS)
+
+bench-matrix-sgx: all
+	gramine-sgx ./verifier \
+		/app/sgx-verifier/benchmark_protocol_matrix.py \
+		--tdx-host $(TDX_HOST) \
+		--tdx-port $(TDX_PORT) \
+		--mode optimized \
+		--no-verify \
+		--baselines $(MATRIX_BASELINES) \
+		--deltas $(MATRIX_DELTAS) \
+		--repeats $(MATRIX_REPEATS) \
+		--output /app/runtime-state/benchmark-results/results_vtpm_optimized_sgx.csv \
+		$(MATRIX_ARGS)
 
 bench-runtime-sgx: all
 	gramine-sgx ./verifier /app/sgx-verifier/benchmark_incremental_runtime.py \

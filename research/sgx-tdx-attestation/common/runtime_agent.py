@@ -187,13 +187,14 @@ class RuntimeEvidenceAgent:
                 print(f"[RTMR3] watcher error: {exc}")
             time.sleep(self.poll_interval)
 
-    def start(self) -> None:
+    def start(self, *, start_watcher: bool = True) -> None:
         if self.running:
             raise RuntimeError("runtime evidence agent is already running")
         self.anchor_startup_log()
         self.running = True
-        self._watcher = threading.Thread(target=self._watch_loop, daemon=True)
-        self._watcher.start()
+        if start_watcher:
+            self._watcher = threading.Thread(target=self._watch_loop, daemon=True)
+            self._watcher.start()
 
     def stop(self) -> None:
         self.running = False
@@ -275,8 +276,23 @@ class RuntimeEvidenceAgent:
             raise RuntimeError("runtime evidence agent has not been started")
 
         with self._lock:
+            collection_started = time.perf_counter()
+            timing = {
+                "stream_reset_ms": 0.0,
+                "stream_sync_ms": 0.0,
+                "sync_and_extend_ms": 0.0,
+                "rtmr_extend_ms": 0.0,
+                "ima_extraction_ms": 0.0,
+                "vtpm_quote_ms": 0.0,
+                "tdx_quote_ms": 0.0,
+            }
             if stream_action == "reset":
-                self.stream.reset(validate_prefix=True)
+                reset_started = time.perf_counter()
+                reset_sync = self.stream.reset(validate_prefix=True)
+                timing["stream_reset_ms"] = (
+                    time.perf_counter() - reset_started
+                ) * 1000.0
+                timing["ima_extraction_ms"] += reset_sync.total_ms
                 self.stats["checkpoint_resyncs"] += 1
 
             self.stats["sync_requests"] += 1
@@ -292,8 +308,23 @@ class RuntimeEvidenceAgent:
             nonce_bytes = base64.b64decode(nonce)
 
             for attempt in range(1, max_attempts + 1):
+                phase_started = time.perf_counter()
                 vtpm = self.vtpm.quote_pcr10(nonce_bytes, bank="sha256")
+                timing["vtpm_quote_ms"] += (
+                    time.perf_counter() - phase_started
+                ) * 1000.0
+
+                phase_started = time.perf_counter()
                 sync, new_entries = self._sync_new_entries_locked()
+                sync_and_extend_ms = (
+                    time.perf_counter() - phase_started
+                ) * 1000.0
+                timing["stream_sync_ms"] += sync.total_ms
+                timing["sync_and_extend_ms"] += sync_and_extend_ms
+                timing["ima_extraction_ms"] += sync.total_ms
+                timing["rtmr_extend_ms"] += max(
+                    0.0, sync_and_extend_ms - sync.total_ms
+                )
                 entries = self.stream.binary_entries
                 ascii_count = self.stream.ascii_count
                 ima_count_before = read_ima_count()
@@ -311,7 +342,11 @@ class RuntimeEvidenceAgent:
                 quote_bytes = b""
                 mrtd = ""
                 if evidence_consistent:
+                    phase_started = time.perf_counter()
                     quote_bytes, mrtd = self.quote_tdx(nonce)
+                    timing["tdx_quote_ms"] += (
+                        time.perf_counter() - phase_started
+                    ) * 1000.0
 
                 pcr10_sha1 = read_pcr10_sha1()
                 pcr10_sha256 = read_pcr10_sha256()
@@ -393,6 +428,11 @@ class RuntimeEvidenceAgent:
                     f"({start_reason}); sending full recovery snapshot"
                 )
 
+            timing["total_ms"] = (
+                time.perf_counter() - collection_started
+            ) * 1000.0
+            timing = {name: round(value, 6) for name, value in timing.items()}
+
             binary_delta = self.stream.binary_delta(start_index)
             ascii_delta = self.stream.ascii_delta(start_index)
             evidence = {
@@ -407,6 +447,7 @@ class RuntimeEvidenceAgent:
                 "pcr10_sha1_debug": pcr10_sha1,
                 "pcr10_sha256_debug": pcr10_sha256,
                 "snapshot": snapshot,
+                "timing": timing,
                 "stream": {
                     "epoch": self.stream_epoch,
                     "requested_start_index": ima_offset,

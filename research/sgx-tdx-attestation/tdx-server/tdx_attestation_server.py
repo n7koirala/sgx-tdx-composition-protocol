@@ -62,7 +62,8 @@ class TDXAttestationServer:
     
     def __init__(self, port: int, cert_file: str, key_file: str, config_path: str,
                  ca_cert_file: str = None, require_client_cert: bool = False,
-                 method: str = METHOD_ITA, enable_ima: bool = True):
+                 method: str = METHOD_ITA, enable_ima: bool = True,
+                 runtime_watcher: bool = True):
         self.port = port
         self.cert_file = cert_file
         self.key_file = key_file
@@ -73,6 +74,7 @@ class TDXAttestationServer:
         self.method = method
         self.runtime_agent = None
         self.enable_ima = enable_ima
+        self.runtime_watcher = runtime_watcher
         self.running = False
         
         # libtdx_attest library handle (for DCAP mode)
@@ -528,7 +530,7 @@ class TDXAttestationServer:
     def run(self):
         """Start the attestation server with optional mTLS"""
         if self.runtime_agent:
-            self.runtime_agent.start()
+            self.runtime_agent.start(start_watcher=self.runtime_watcher)
 
         # Create TLS context (with mTLS if configured)
         tls_context = create_tls_context_server(
@@ -605,6 +607,14 @@ class TDXAttestationServer:
                 f"{'yes' if runtime['ak_cert_present'] else 'no'}"
             )
             print(f"IMA Reader:       {runtime['reader_mode']}")
+            print(
+                "Runtime Sync:     "
+                + (
+                    "background-watcher"
+                    if self.runtime_watcher
+                    else "request-driven (benchmark)"
+                )
+            )
         print("=" * 70)
         if self.require_client_cert:
             print("\n[SECURE] Only clients with valid certificates can connect.")
@@ -790,6 +800,13 @@ def main():
     parser.add_argument("--enable-ima", type=lambda x: x.lower() != 'false',
                        default=True, metavar="BOOL",
                        help="Include IMA event log in responses (default: true)")
+    parser.add_argument(
+        "--request-driven-runtime", action="store_true",
+        help=(
+            "Benchmark mode: keep IMA descriptors open but synchronize pending "
+            "entries on each request instead of in the background"
+        ),
+    )
     
     args = parser.parse_args()
     
@@ -814,7 +831,8 @@ def main():
             ca_cert_file=ca_cert_file if args.require_client_cert else None,
             require_client_cert=args.require_client_cert,
             method=args.method,
-            enable_ima=args.enable_ima
+            enable_ima=args.enable_ima,
+            runtime_watcher=not args.request_driven_runtime,
         )
         server.run()
     except KeyboardInterrupt:
