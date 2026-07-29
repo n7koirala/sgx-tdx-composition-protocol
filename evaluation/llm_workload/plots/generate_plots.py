@@ -8,7 +8,7 @@ Produces the six figures described in the evaluation plan:
 
   fig1_throughput_by_condition.pdf
       Throughput (req/s, out tok/s) across native / tdx-only / tdx-vordr
-      at fixed epoch. Two bar groups per condition: steady vs with-updates.
+      at fixed epoch. Two bar groups per condition: no-updates vs with-updates.
 
   fig2_ttft_tail_by_condition.pdf
       TTFT p50/p95/p99 across the three conditions, same grouping.
@@ -25,7 +25,7 @@ Produces the six figures described in the evaluation plan:
       stem plot (bottom). Visual alignment of tail spikes with Δn bursts.
 
   fig6_ima_growth.pdf
-      IMA entries/min bar: cold vs warm × steady vs with-updates.
+      IMA entries/min bar: cold vs warm × no-updates vs with-updates.
 
 Usage:
     python3 plots/generate_plots.py --root ../results/llm/2026-04-21T14-00
@@ -103,7 +103,7 @@ def filter_rows(rows, **kv):
 # Figure 1: Throughput by condition
 # ───────────────────────────────────────────────────────────────────
 def fig1_throughput(rows, out_dir, ref_epoch="30", log_size="warm"):
-    groups = ["steady", "with-updates"]
+    groups = ["no-updates", "with-updates"]
     x = np.arange(len(COND_ORDER))
     w = 0.38
 
@@ -149,7 +149,7 @@ def fig1_throughput(rows, out_dir, ref_epoch="30", log_size="warm"):
 # Figure 2: TTFT tail by condition
 # ───────────────────────────────────────────────────────────────────
 def fig2_ttft_tail(rows, out_dir, ref_epoch="30", log_size="warm"):
-    groups = ["steady", "with-updates"]
+    groups = ["no-updates", "with-updates"]
     metrics = [("ttft_p50_ms", "p50"),
                ("ttft_p95_ms", "p95"),
                ("ttft_p99_ms", "p99")]
@@ -189,7 +189,7 @@ def fig2_ttft_tail(rows, out_dir, ref_epoch="30", log_size="warm"):
 # ───────────────────────────────────────────────────────────────────
 # Figure 3: Epoch sweep — overhead vs TDX-only
 # ───────────────────────────────────────────────────────────────────
-def fig3_epoch_sweep(rows, out_dir, interleave="steady"):
+def fig3_epoch_sweep(rows, out_dir, interleave="no-updates"):
     # Baseline per (log_size) from tdx-only.
     base = {}
     for ls in ("cold", "warm"):
@@ -253,7 +253,7 @@ def fig3_epoch_sweep(rows, out_dir, interleave="steady"):
 def fig4_delta_n_hist(rows, out_dir):
     # Prefer with-updates + warm + 30s epoch if present.
     wanted = None
-    for pref in (("with-updates", "warm", "30"), ("steady", "warm", "30")):
+    for pref in (("with-updates", "warm", "30"), ("no-updates", "warm", "30")):
         cand = [r for r in rows if r["condition"] == "tdx-vordr"
                 and r["interleave"] == pref[0]
                 and r["log_size"] == pref[1]
@@ -303,7 +303,7 @@ def fig4_delta_n_hist(rows, out_dir):
 # ───────────────────────────────────────────────────────────────────
 def fig5_timeline(rows, out_dir):
     wanted = None
-    for pref in (("with-updates", "warm", "30"), ("steady", "warm", "30")):
+    for pref in (("with-updates", "warm", "30"), ("no-updates", "warm", "30")):
         cand = [r for r in rows if r["condition"] == "tdx-vordr"
                 and r["interleave"] == pref[0]
                 and r["log_size"] == pref[1]
@@ -389,7 +389,7 @@ def fig6_ima_growth(rows, out_dir):
             cells[key].append(v)
 
     log_sizes = ["cold", "warm"]
-    interleaves = ["steady", "with-updates"]
+    interleaves = ["no-updates", "with-updates"]
     x = np.arange(len(log_sizes))
     w = 0.38
 
@@ -412,13 +412,236 @@ def fig6_ima_growth(rows, out_dir):
     print(f"  wrote {path}")
 
 
+# ───────────────────────────────────────────────────────────────────
+# Figure 7: Matched Vordr-vs-tdx-only comparison (no significant overhead)
+# ───────────────────────────────────────────────────────────────────
+def fig7_matched_vordr_tdx(rows, out_dir):
+    """For each (log,interleave) cell, compare tdx-only baseline against
+    the four tdx-vordr cells (one per epoch). Demonstrates that Vordr adds
+    near-zero throughput cost on top of TDX."""
+    log_sizes = ["cold", "warm"]
+    interleaves = ["no-updates", "with-updates"]
+    epochs = ["15", "30", "60", "300"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.4), sharey=True)
+    for ax, il in zip(axes, interleaves):
+        xs = np.arange(len(log_sizes))
+        w = 0.14
+        # tdx-only baseline bars
+        base = []
+        for ls in log_sizes:
+            sub = filter_rows(rows, condition="tdx-only",
+                              log_size=ls, interleave=il)
+            vs = [to_float(r["req_per_s"]) for r in sub]
+            vs = [v for v in vs if v == v]
+            base.append(np.mean(vs) if vs else np.nan)
+        ax.bar(xs - 2.5 * w, base, w, label="tdx-only",
+               color=COND_COLORS["tdx-only"], edgecolor="black", linewidth=0.5)
+
+        for ei, ep in enumerate(epochs):
+            vals = []
+            for ls in log_sizes:
+                sub = [r for r in rows if r["condition"] == "tdx-vordr"
+                       and r["log_size"] == ls and r["interleave"] == il
+                       and r["epoch_sec"] == ep]
+                vs = [to_float(r["req_per_s"]) for r in sub]
+                vs = [v for v in vs if v == v]
+                vals.append(np.mean(vs) if vs else np.nan)
+            ax.bar(xs + (ei - 1.0) * w, vals, w,
+                   label=f"tdx-vordr (T={ep}s)",
+                   color=COND_COLORS["tdx-vordr"],
+                   edgecolor="black", linewidth=0.5,
+                   alpha=0.55 + 0.12 * ei)
+
+        ax.set_xticks(xs)
+        ax.set_xticklabels(log_sizes)
+        ax.set_title(il)
+        ax.set_ylabel("req/s" if ax is axes[0] else "")
+    axes[1].legend(frameon=False, loc="lower right", fontsize=8)
+
+    fig.suptitle("Vordr vs tdx-only throughput — near-zero overhead",
+                 fontsize=11)
+    fig.tight_layout()
+    path = os.path.join(out_dir, "fig7_vordr_vs_tdx_only_matched.pdf")
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  wrote {path}")
+
+
+# ───────────────────────────────────────────────────────────────────
+# Figure 8: Per-request TTFT CDF by condition
+# ───────────────────────────────────────────────────────────────────
+def fig8_ttft_cdf(rows, out_dir, log_size="warm", interleave="no-updates",
+                  ref_epoch="30"):
+    """Pool per-request TTFT arrays from vllm.json across the 4 cells of
+    each condition (tdx-vordr pinned to ref_epoch) and draw an empirical CDF."""
+
+    def collect(cond, epoch_filter=None):
+        pool = []
+        for r in rows:
+            if r["condition"] != cond:
+                continue
+            if epoch_filter is not None and r.get("epoch_sec") != epoch_filter:
+                continue
+            path = os.path.join(r["run_dir"], "vllm.json")
+            if not os.path.exists(path):
+                continue
+            with open(path) as f:
+                doc = json.load(f)
+            # vLLM v0.6.3: ttfts[] is in seconds.
+            pool.extend([v * 1000 for v in (doc.get("ttfts") or [])])
+        return np.array(pool) if pool else None
+
+    fig, ax = plt.subplots(figsize=(5.2, 3.2))
+    for cond, epoch_filter in [("native", None),
+                               ("tdx-only", None),
+                               ("tdx-vordr", ref_epoch)]:
+        xs = collect(cond, epoch_filter)
+        if xs is None or len(xs) == 0:
+            continue
+        xs = np.sort(xs)
+        ys = np.arange(1, len(xs) + 1) / len(xs)
+        label = cond if epoch_filter is None else f"{cond} (T={epoch_filter}s)"
+        ax.plot(xs, ys, label=label, color=COND_COLORS[cond], linewidth=2)
+
+    ax.set_xscale("log")
+    ax.set_xlabel("TTFT (ms)")
+    ax.set_ylabel("CDF")
+    ax.set_title(f"Per-request TTFT distribution  ({log_size}, {interleave})")
+    ax.legend(frameon=False, loc="lower right")
+    fig.tight_layout()
+    path = os.path.join(out_dir, "fig8_ttft_cdf.pdf")
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  wrote {path}")
+
+
+# ───────────────────────────────────────────────────────────────────
+# Figure 9: Attestation round cost breakdown by epoch
+# ───────────────────────────────────────────────────────────────────
+def fig9_round_cost_breakdown(rows, out_dir):
+    """Stacked bar per attestation epoch: where does a round's time go?
+    Components from attest.csv:
+        t_connect + t_request + t_server_ima_read + t_server_quote
+        + t_quote_verify + t_ima_verify  ≈ t_total
+    """
+    epochs = ["15", "30", "60", "300"]
+    components = [
+        ("t_connect_ms",         "TLS connect"),
+        ("t_request_ms",         "request I/O"),
+        ("t_server_ima_read_ms", "IMA read (server)"),
+        ("t_server_quote_ms",    "quote gen (server)"),
+        ("t_quote_verify_ms",    "quote verify (client)"),
+        ("t_ima_verify_ms",      "IMA verify (client)"),
+    ]
+
+    means = {ep: {c: [] for c, _ in components} for ep in epochs}
+    for r in rows:
+        if r["condition"] != "tdx-vordr":
+            continue
+        ep = r.get("epoch_sec")
+        if ep not in means:
+            continue
+        ac = os.path.join(r["run_dir"], "attest.csv")
+        if not os.path.exists(ac):
+            continue
+        with open(ac) as f:
+            for row in csv.DictReader(f):
+                for c, _ in components:
+                    try:
+                        means[ep][c].append(float(row[c]))
+                    except (ValueError, KeyError):
+                        pass
+
+    fig, ax = plt.subplots(figsize=(5.6, 3.4))
+    xs = np.arange(len(epochs))
+    bottoms = np.zeros(len(epochs))
+    palette = plt.get_cmap("tab20c")(np.linspace(0, 1, len(components)))
+    for (col, label), color in zip(components, palette):
+        vals = [np.mean(means[ep][col]) if means[ep][col] else 0.0
+                for ep in epochs]
+        ax.bar(xs, vals, bottom=bottoms, label=label, color=color,
+               edgecolor="black", linewidth=0.3)
+        bottoms += np.array(vals)
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"{e}s" for e in epochs])
+    ax.set_xlabel("Attestation epoch T")
+    ax.set_ylabel("Mean round time (ms)")
+    ax.set_title("Where does each attestation round spend its time?")
+    ax.legend(frameon=False, fontsize=8, loc="upper left")
+    fig.tight_layout()
+    path = os.path.join(out_dir, "fig9_round_cost_breakdown.pdf")
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  wrote {path}")
+
+
+# ───────────────────────────────────────────────────────────────────
+# Figure 10: Attestation duty cycle vs epoch
+# ───────────────────────────────────────────────────────────────────
+def fig10_duty_cycle(rows, out_dir):
+    """What fraction of wall-clock does attestation consume?
+    duty = sum(t_total_ms) / (run_duration * 1000)
+    Lower is better — demonstrates Vordr does not steal CPU from workload."""
+    epochs = ["15", "30", "60", "300"]
+    duty_by_epoch = defaultdict(list)
+
+    for r in rows:
+        if r["condition"] != "tdx-vordr":
+            continue
+        ep = r.get("epoch_sec")
+        if ep not in epochs:
+            continue
+        ac = os.path.join(r["run_dir"], "attest.csv")
+        if not os.path.exists(ac):
+            continue
+        dur = to_float(r["duration_sec"])  # warmup+duration not tracked separately
+        # Approximate wall-clock of attestation phase ≈ (warmup + duration)
+        warmup = to_float(r.get("warmup_sec", "0"))
+        wall_ms = (dur if dur == dur else 0) * 1000
+        if not (wall_ms > 0):
+            continue
+        with open(ac) as f:
+            total_t = 0.0
+            for row in csv.DictReader(f):
+                try:
+                    total_t += float(row["t_total_ms"])
+                except (ValueError, KeyError):
+                    continue
+        duty_by_epoch[ep].append(100.0 * total_t / wall_ms)
+
+    xs = np.arange(len(epochs))
+    means = [np.mean(duty_by_epoch[ep]) if duty_by_epoch[ep] else 0
+             for ep in epochs]
+    stds = [np.std(duty_by_epoch[ep]) if duty_by_epoch[ep] else 0
+            for ep in epochs]
+
+    fig, ax = plt.subplots(figsize=(5.0, 3.2))
+    ax.bar(xs, means, yerr=stds, capsize=4,
+           color=COND_COLORS["tdx-vordr"],
+           edgecolor="black", linewidth=0.5)
+    for i, m in enumerate(means):
+        ax.text(xs[i], m, f"{m:.2f}%", ha="center", va="bottom", fontsize=9)
+    ax.set_xticks(xs)
+    ax.set_xticklabels([f"{e}s" for e in epochs])
+    ax.set_xlabel("Attestation epoch T")
+    ax.set_ylabel("Attestation duty cycle (% of run)")
+    ax.set_title("Wall-clock fraction spent in attestation")
+    fig.tight_layout()
+    path = os.path.join(out_dir, "fig10_duty_cycle.pdf")
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  wrote {path}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
     ap.add_argument("--out-dir", default=None,
                     help="Where to write figures (default: <root>/figures)")
     ap.add_argument("--ref-epoch", default="30",
-                    help="Which epoch to use as reference for figs 1,2")
+                    help="Which epoch to use as reference for figs 1,2,8")
     ap.add_argument("--ref-log-size", default="warm")
     args = ap.parse_args()
 
@@ -430,10 +653,15 @@ def main():
 
     fig1_throughput(rows, out_dir, args.ref_epoch, args.ref_log_size)
     fig2_ttft_tail(rows, out_dir, args.ref_epoch, args.ref_log_size)
-    fig3_epoch_sweep(rows, out_dir, interleave="steady")
+    fig3_epoch_sweep(rows, out_dir, interleave="no-updates")
     fig4_delta_n_hist(rows, out_dir)
     fig5_timeline(rows, out_dir)
     fig6_ima_growth(rows, out_dir)
+    fig7_matched_vordr_tdx(rows, out_dir)
+    fig8_ttft_cdf(rows, out_dir, log_size=args.ref_log_size,
+                  interleave="no-updates", ref_epoch=args.ref_epoch)
+    fig9_round_cost_breakdown(rows, out_dir)
+    fig10_duty_cycle(rows, out_dir)
     print(f"[plots] figures → {out_dir}")
 
 

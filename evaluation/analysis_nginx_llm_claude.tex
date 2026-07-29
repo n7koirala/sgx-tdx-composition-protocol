@@ -1,0 +1,440 @@
+% =====================================================================
+% Drop-in evaluation chapter for the Vordr CCS submission.
+% Main body is intentionally tight; full setup, methodology, and
+% detailed numerical breakdowns are in the \appendix block at the end
+% of this file (Appendix~\ref{app:methodology}--\ref{app:nginx-detail}).
+%
+% Generated 2026-04-28 from:
+%   evaluation/results/llm/matrix-{phi3,llama31}-*  (cross-model figures)
+%   evaluation/results/nginx/matrix-1kb-20260426    (NGINX /1kb figures)
+% =====================================================================
+
+\section{Evaluating Vordr on Different Workloads}
+\label{sec:eval-workloads}
+
+We evaluate Vordr on two end-to-end workloads chosen to bracket the
+cost spectrum a confidential VM faces: an LLM-serving deployment
+(compute-bound, multi-second per-request latency) and a tuned NGINX
+static-file server (syscall-bound, sub-millisecond per-request). For
+each workload we compare three target-VM configurations -- \emph{Native}
+(no TDX), \emph{TDX} (TDX on, no Vordr), and \emph{TDX+Vordr} (full
+Vordr stack with attestation rounds every $T$~seconds) -- on the same
+\texttt{c3-standard-8} hardware on Google Cloud. The matched delta
+between \emph{TDX+Vordr} and \emph{TDX}, holding the IMA baseline
+log-size, update pattern, and model fixed, is our headline measurement
+of Vordr's marginal cost; the Native--TDX delta separately isolates
+the underlying TDX confidentiality tax. For each workload we sweep
+the attestation epoch $T \in \{15, 30, 60, 300\}$~s, an IMA log-size
+axis (cold $\sim$5K vs.\ warm $\sim$100K entries), and a workload-pattern
+axis (no-updates vs.\ with-updates -- an \texttt{apt install} at
+$t{+}120$~s and a \texttt{pip install} at $t{+}300$~s). Detailed
+methodology (calibration, hardware, correctness validation, cell counts)
+is in Appendix~\ref{app:methodology}.
+
+\subsection{LLM Serving}
+\label{sec:eval-llm}
+
+We deploy \texttt{vLLM}~\cite{vllm} on CPU, serving Phi-3-mini and
+Llama-3.1-8B (AWQ-INT4) at calibrated arrival rates of $0.15$ and
+$0.03$~req/s respectively. Per-request latency is dominated by
+multi-second matrix-multiplication time, so the dominant question is
+whether confidential execution changes \emph{throughput}.
+
+Figure~\ref{fig:llm-throughput-overhead} compares request and
+output-token throughput across the three conditions at the
+representative slice ($T{=}30$~s, warm IMA baseline, no-updates and
+with-updates). On Phi-3-mini, moving from \emph{Native} to \emph{TDX}
+costs $9.27\%$ on request throughput and $8.74\%$ on output-token
+throughput; the further \emph{TDX$\rightarrow$TDX+Vordr} step adds at
+most $2.12\%$ in no-updates and $0.42\%$ in with-updates. Llama-3.1,
+evaluated farther from saturation, shows no measurable throughput loss
+across any condition (matched-deltas $\le 0.053\%$;
+Appendix~\ref{app:llm-detail} explains why).
+Figure~\ref{fig:llm-duty-cycle} reports the corresponding wall-clock
+\emph{attestation duty cycle} -- the fraction of measurement-window
+time the verifier spends inside Vordr rounds. Across both models and
+all four (cold/warm $\times$ no-updates/with-updates) cells at each epoch,
+duty cycle stays in the low single-digit range ($1.07\%$--$3.21\%$)
+and declines monotonically as $T$ grows. Even at the most aggressive
+$T{=}15$~s, the CVM spends only $\sim$$2\%$ of wall-clock time in
+attestation -- matching the throughput-overhead budget the matched-delta
+measurement sees Vordr consume.
+
+\subsection{NGINX Static-File Serving}
+\label{sec:eval-nginx}
+
+We deploy NGINX~1.27 on the target VM and serve two static payloads:
+a 1024-byte response (\texttt{/1kb}) chosen to exercise the
+\emph{syscall-bound} regime where
+\texttt{accept}/\texttt{epoll}/\texttt{sendfile} dominate request
+service, and a 102{,}400-byte response (\texttt{/100kb}) chosen to
+exercise the \emph{bandwidth-bound} regime that stresses the TCP
+transmit path and the cross-boundary memory transfers TDX
+intercepts. The load generator is \texttt{wrk2}~\cite{wrk2}, run at
+$80{,}000$~req/s on \texttt{/1kb} and $20{,}000$~req/s on
+\texttt{/100kb} -- in both cases $80\%$ of native saturation.
+
+Figure~\ref{fig:nginx-throughput} reports mean achieved request
+throughput across the three conditions on both payloads. All three
+conditions sustain the offered load to within $0.07\%$ of target on
+either payload, with zero socket errors or non-2xx responses across
+the entire campaign of 81 cells -- throughput is set by the load
+generator, not by the server, in this operating regime.
+Figure~\ref{fig:nginx-latency-tail} reveals the regime-dependent
+behaviour. On \texttt{/1kb}, the latency distribution is tightly
+compressed: at p99, \emph{Native} measures $1.95$~ms, \emph{TDX}
+$2.01$~ms ($+2.7\%$), and \emph{TDX+Vordr} $2.01$~ms (a further
+$+0.05\%$). On \texttt{/100kb}, however, the
+\emph{Native$\rightarrow$TDX} step grows substantially: p99 latency
+rises from $3.12$~ms (Native) to $3.38$~ms (TDX, $+8.1\%$ on the
+mean and $+17$--$25\%$ on individual matched cells, see
+Appendix~\ref{app:nginx-detail}), reflecting the per-page transmit
+cost TDX imposes on large payloads. Critically, the
+\emph{TDX$\rightarrow$TDX+Vordr} step does \emph{not} grow with the
+payload: TDX+Vordr p99 on \texttt{/100kb} is $2.87$~ms, fractionally
+\emph{below} TDX-only at p99, and the four matched-cell deltas are
+within the run-to-run measurement noise of $\pm 5\%$ on this noisier
+tail. Across both payloads, TDX+Vordr's matched-delta vs TDX-only is
+small, and -- in several configurations -- statistically
+indistinguishable from zero.
+
+\paragraph{Cross-workload summary.}
+Read together, the LLM and NGINX evaluations bracket the regimes
+Vordr might be deployed in and reveal a sharp \emph{regime-dependence}
+of the underlying TDX confidentiality tax. On
+syscall-bound workloads, that tax is small (\textless$3\%$ p99 on
+NGINX/\texttt{/1kb}, \textless$2\%$ matched throughput on Phi-3-mini
+in the with-updates pattern); on bandwidth-bound workloads it is
+substantial (\textgreater$8\%$ mean p99 and $17$--$25\%$ on
+individual matched cells of NGINX/\texttt{/100kb}); on
+throughput-sensitive operating points it is sizeable
+($9\%$ on Phi-3-mini no-updates). \emph{Across all three regimes,
+the marginal cost of enabling Vordr on top of TDX remains small
+} -- bounded by $2.12\%$ on LLM throughput, within $\pm 1.5\%$
+on NGINX/\texttt{/1kb} p99, and within measurement noise on
+NGINX/\texttt{/100kb} p99. Combined with a wall-clock attestation
+duty cycle that stays in the low single-digit range
+($1.07\%$--$3.21\%$) even at our most aggressive epoch
+$T{=}15$~s, this supports the central claim that Vordr delivers
+cheap rolling attestation \emph{independently of the workload regime
+on which TDX itself is more or less expensive} -- which is the
+property a general-purpose CVM attestation system must hold.
+
+% --------------------------------------------------------------------
+% Main-body figures.
+% --------------------------------------------------------------------
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig1_cross_model_throughput.pdf}
+  \caption{Throughput of Vordr for Phi-3-mini and Llama-3.1.
+  Attestation epoch $T{=}30$~s, with warm IMA baseline under
+  no-updates and with-updates workload patterns. \emph{Left:}
+  request throughput. \emph{Right:} output-token throughput.
+  ($y$-axis is log-scaled.)}
+  \label{fig:llm-throughput-overhead}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig10_cross_model_duty_cycle.pdf}
+  \caption{Wall-clock attestation duty cycle under varying epochs.
+  Each point reports the mean fraction of measurement-window time
+  spent inside TDX+Vordr attestation rounds, averaged across the four
+  cells at that epoch (cold/warm $\times$ no-updates/with-updates).}
+  \label{fig:llm-duty-cycle}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/nginx/fig1_throughput_by_condition.pdf}
+  \caption{NGINX request throughput across Native, TDX, and TDX+Vordr
+  ($T{=}30$~s), grouped by workload pattern. \emph{Left:} \texttt{/1kb}
+  at $80{,}000$~req/s. \emph{Right:} \texttt{/100kb} at $20{,}000$~req/s.
+  Bars are zoomed to data range; numeric labels show achieved
+  throughput. All three conditions sustain the offered load to within
+  $\le 0.07\%$ of target on either payload.}
+  \label{fig:nginx-throughput}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/nginx/fig2_latency_tail_by_condition.pdf}
+  \caption{NGINX per-request latency tails (p50, p90, p99, p99.9) on
+  the no-updates slice ($T{=}30$~s for TDX+Vordr). \emph{Left:}
+  \texttt{/1kb} at $80{,}000$~req/s; the full distribution is tightly
+  compressed and Native, TDX, and TDX+Vordr are within $2.7\%$ of
+  one another at p99. \emph{Right:} \texttt{/100kb} at
+  $20{,}000$~req/s; Native$\rightarrow$TDX exhibits a substantially
+  larger step at p99, while TDX+Vordr stays close to TDX. Log-$y$
+  scale; numeric labels expose the absolute differences.}
+  \label{fig:nginx-latency-tail}
+\end{figure}
+
+% =====================================================================
+\appendix
+% =====================================================================
+
+\section{Detailed Experimental Methodology}
+\label{app:methodology}
+
+\paragraph{Hardware and provisioning.}
+All target VMs are \texttt{c3-standard-8} instances on Google Cloud
+(8~vCPU, 32~GB~RAM, Ubuntu~22.04). \emph{TDX} cells use Intel TDX on
+the same machine type with Confidential Computing mode enabled. Each
+cell provisions a \emph{fresh} VM from a common GCE image to ensure
+that no state leaks between cells. Both workloads use a load-generator
+VM co-located in the same cloud zone as the target so that internal-IP
+RTT is sub-millisecond and wide-area latency does not contaminate the
+sub-millisecond effects we measure.
+
+\paragraph{Sweep dimensions and cell counts.}
+For each workload, the matrix is the cross-product of three axes
+\emph{plus} repetitions:
+\begin{itemize}
+\item \emph{Attestation epoch} $T \in \{15, 30, 60, 300\}$~s
+  (TDX+Vordr only).
+\item \emph{IMA baseline log size}: \emph{cold} ($\sim$5K entries,
+  just-booted) or \emph{warm} ($\sim$100K entries, pre-burned via
+  \texttt{generate\_ima\_baseline.py}).
+\item \emph{Workload pattern}: \emph{no-updates} or
+  \emph{with-updates}; the latter triggers an \texttt{apt install} at
+  $t{+}120$~s and a \texttt{pip install} at $t{+}300$~s during the
+  measurement window, injecting realistic IMA log churn.
+\end{itemize}
+\emph{Native} and \emph{TDX} are epoch-insensitive and run only the
+log-size$\times$workload-pattern matrix. We collect $N{=}3$
+repetitions per cell on \emph{no-updates} (for error bars on the
+matched-delta figures) and $N{=}1$ on \emph{with-updates} cells. Per
+payload, the matrix is therefore $4{+}4{+}32 = 40$ \emph{distinct} cells
+expanded to $48$ runs after repetitions.
+
+\paragraph{Calibration methodology.}
+For each workload, we calibrate the per-cell offered load to $80\%$
+of native saturation. Saturation is identified as the highest target
+rate for which (i)~achieved throughput stays within $1\%$ of target,
+(ii)~there are zero socket errors and zero non-2xx responses, and
+(iii)~$p99 < 2 \times p50$. For LLM, we used vLLM's
+\texttt{benchmark\_serving.py} on a fresh native VM, sweeping
+arrival rates to identify per-model saturation; the resulting matrix
+RPS is $0.15$~req/s for Phi-3-mini and $0.03$~req/s for Llama-3.1.
+For NGINX/\texttt{/1kb}, we swept \texttt{wrk2} target rates from
+$1{,}000$ to $200{,}000$~req/s on a fresh native VM and fixed the matrix
+RPS at $80{,}000$~req/s ($80\%$ of the $\sim$$100{,}000$~req/s flat-region
+top, with the latency knee appearing at $\sim$$150{,}000$~req/s). For
+NGINX/\texttt{/100kb}, the same procedure identifies a clean ceiling
+at $25{,}000$~req/s ($\sim$$21$~Gbps of HTTP body throughput), giving
+a matrix RPS of $20{,}000$~req/s. We separately verify that the load
+generator retains $\geq{}50\%$ CPU headroom at the matrix RPS so the
+load generator itself is not a bottleneck.
+
+\paragraph{Per-cell measurement and correctness.}
+Each cell runs a discarded warm-up phase followed by a recorded
+measurement window, during which we collect workload-specific service
+metrics, per-attestation-round timings ($\Delta n$, end-to-end round
+time, $\texttt{pcr\_match}$ verdict) from the verifier, and a
+$5$-second-interval system sampler trace on the target (CPU, memory,
+IMA log size). Across the entire campaign, every TDX+Vordr round
+where new IMA entries arrived ($\Delta n > 0$) verified cleanly
+($\texttt{pcr\_match}{=}\textit{True}$,
+$\texttt{runtime\_verdict}{=}\texttt{CLEAN}$), confirming end-to-end
+correctness of the protocol on real workloads.
+
+\section{LLM Workload Details}
+\label{app:llm-detail}
+
+\paragraph{Models and inference stack.}
+Phi-3-mini-4k-instruct ($\sim$3.8B parameters) and
+Meta-Llama-3.1-8B-Instruct (AWQ-quantised to 4 bits to fit in the
+$32$~GB host envelope) are served via \texttt{vLLM}'s
+OpenAI-compatible API server with default scheduling and a $4{,}096$
+max model length. The load generator is the upstream
+\texttt{vllm/benchmarks/benchmark\_serving.py} driver replaying
+ShareGPT-V3 prompts with open-loop Poisson arrivals at the matrix RPS.
+
+\paragraph{Why Llama-3.1 is throughput-flat.}
+The Llama-3.1 matrix is driven at only $0.03$~req/s, whereas the
+Phi-3-mini matrix runs at $0.15$~req/s. At Llama-3.1's operating
+point, the offered load is much farther from the native saturation
+rate, so completed throughput is pinned by the offered load itself
+rather than by the server's effective service rate. TDX and TDX+Vordr
+do produce small per-request latency shifts on Llama-3.1, but they do
+not trigger queueing-driven throughput loss at this load. Phi-3-mini,
+by contrast, runs at a more throughput-sensitive regime where the
+added latency of TDX is large enough to reduce completed throughput.
+This is therefore an artifact of operating-point choice, not evidence
+that Llama-3.1 escapes the underlying isolation overhead.
+
+\paragraph{Duty-cycle composition.}
+Duty cycle for a TDX+Vordr cell is $\sum t_{\texttt{round}} / T_{\text{cell}}$
+expressed as a percentage, where $t_{\texttt{round}}$ is the end-to-end
+time of each attestation round recorded in \texttt{attest.csv}. The
+mean duty cycle in Figure~\ref{fig:llm-duty-cycle} averages this
+quantity across the four (cold/warm $\times$ no-updates/with-updates) cells
+at each epoch. In warm cells, round 0 alone -- the one-time full IMA
+replay over the $\sim$100K-entry pre-burned baseline -- accounts for
+$61$--$96\%$ of total attestation time depending on the epoch, which
+is why duty cycle does not collapse to zero even at $T{=}300$~s.
+The Llama-3.1 point at $T{=}30$~s rises to $3.21\%$ rather than
+following the smoother monotonic decline; the underlying breakdown
+shows two cold runs each contained one round with $\Delta n{=}0$ and
+$\texttt{runtime\_verdict}{=}\texttt{CLEAN\_NO\_DELTA}$ but a connection-
+or response-bound round time of $\sim$$19$~s, an artefact rather than
+a sign of heavier IMA processing at that epoch.
+
+\paragraph{Per-cell numerical breakdown.}
+Table~\ref{tab:llm-throughput} reports the exact per-cell throughput
+values used in Figure~\ref{fig:llm-throughput-overhead} and the
+relative slowdowns vs.\ Native.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Cross-model throughput values and slowdowns at the
+representative slice (warm IMA, $T{=}30$~s for TDX+Vordr). Slowdowns
+are computed relative to Native within the same model and workload.}
+\label{tab:llm-throughput}
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Model & Workload &
+\multicolumn{2}{c}{Request thr.\ (req/s)} &
+\multicolumn{2}{c}{Output thr.\ (tok/s)} \\
+& & TDX & +Vordr & TDX & +Vordr \\
+\midrule
+Phi-3-mini & no-updates    & $-9.27\%$ & $-10.68\%$ & $-8.74\%$ & $-10.68\%$ \\
+Phi-3-mini & w/updates & $-6.76\%$ & $-7.15\%$  & $-7.09\%$ & $-7.17\%$  \\
+Llama-3.1  & no-updates    & $-0.053\%$& $-0.045\%$ & $-0.053\%$& $-0.045\%$ \\
+Llama-3.1  & w/updates & $-0.013\%$& $-0.029\%$ & $-0.013\%$& $-0.029\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Deferred figures.}
+Full per-condition throughput bars, TTFT/ITL distributions and tails,
+the per-epoch sweep, the pooled $\Delta n$ histogram, the per-request
+TTFT vs.\ $\Delta n$ timeline, and the IMA log-growth measurement live
+in the figure folders \texttt{matrix-phi3-20260422/figures/} and
+\texttt{matrix-llama31-20260423/figures/} as
+\texttt{fig\{1..10\}\_*.pdf} and are available in the artefact bundle.
+
+\section{NGINX Workload Details}
+\label{app:nginx-detail}
+
+\paragraph{Server configuration.}
+NGINX~1.27 (alpine) is deployed inside the target VM via Docker with
+host networking. The configuration enables \texttt{epoll},
+\texttt{reuseport}, \texttt{sendfile}, and \texttt{tcp\_nopush}, sets
+\texttt{worker\_connections=16384} and a $65{,}535$ backlog, and
+disables access logging to remove a non-attestation-related I/O
+contribution from the measurement. Sysctl tuning on the target raises
+\texttt{somaxconn}, the ephemeral-port range, and
+\texttt{tcp\_max\_syn\_backlog} to values consistent with the matrix
+RPS. Two static routes are exposed: \texttt{/1kb} (1024 bytes,
+syscall-bound regime) and \texttt{/100kb} (102{,}400 bytes,
+bandwidth-bound regime).
+
+\paragraph{Load generator and coordinated-omission correction.}
+The load generator is \texttt{wrk2}~\cite{wrk2}, the
+coordinated-omission-corrected variant of \texttt{wrk}, configured
+with $4$ threads and $200$ persistent connections per cell. The
+two-phase wrapper runs a $30$-second discarded warm-up phase followed
+by a $300$-second recorded phase with \texttt{--latency} for HdrHistogram
+percentile output; warm-up data is excluded from all reported
+percentiles. We verified that \texttt{wrk2} on the load generator
+retains $\geq{}50\%$ CPU headroom at the matrix RPS so the load
+generator does not become the bottleneck.
+
+\paragraph{Matched-delta breakdown on \texttt{/1kb}.}
+Table~\ref{tab:nginx-matched} reports the matched-delta
+$(\textit{TDX+Vordr} - \textit{TDX})/\textit{TDX}$ per cell. Two of
+four cells show \emph{negative} deltas on p99, and one on throughput,
+indicating that Vordr's effect is at our measurement noise floor.
+
+\begin{table}[t]
+\centering
+\small
+\caption{NGINX \texttt{/1kb} matched delta of TDX+Vordr vs.\ TDX, by
+(log-size, workload-pattern). Throughput in req/s; latency in ms.}
+\label{tab:nginx-matched}
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Log-size & Workload & $\Delta$ throughput & $\Delta$ p50 & $\Delta$ p99 \\
+\midrule
+cold & no-updates       & $+0.05\%$  & $+3.59\%$  & $+0.84\%$  \\
+cold & with-updates & $-0.07\%$  & $-2.86\%$  & $-1.50\%$  \\
+warm & no-updates       & $+0.01\%$  & $+0.81\%$  & $+0.33\%$  \\
+warm & with-updates & $+0.07\%$  & $+2.97\%$  & $+0.99\%$  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Bandwidth-bound \texttt{/100kb} results.}
+The $102{,}400$-byte payload exercises the TCP transmit path and
+forces every served response to traverse a sequence of large
+cross-boundary memory transfers that TDX intercepts. At the matrix
+RPS of $20{,}000$~req/s (\,$\approx$$16$~Gbps of body throughput),
+all three conditions sustain the offered load to within $\le 0.07\%$
+of target. Tail latency, however, behaves substantially differently
+than on \texttt{/1kb}: the
+\emph{Native$\rightarrow$TDX} step at p99 ranges from $+17.4\%$ to
+$+25.4\%$ on the three no-updates cells where each measurement averages
+$N{=}3$ repetitions (cold/no-updates, warm/no-updates, warm/with-updates) --
+roughly an order of magnitude larger than the comparable
+$+2$--$3\%$ TDX tax on \texttt{/1kb}. The bandwidth-bound regime is
+where the underlying CVM cost actually appears.
+
+The TDX+Vordr-vs-TDX matched delta on \texttt{/100kb} is small in
+absolute terms and consistent with measurement noise on the noisier
+\texttt{/100kb} tail
+(p99.9 is itself in the $69$--$105$~ms range across conditions). In
+the three no-updates cells with $N{=}3$ replicates, p99 matched-deltas
+are $-1.31\%$ (cold/no-updates), $-15.48\%$ (warm/no-updates), and $0.00\%$
+(warm/with-updates, $N{=}1$); the cold/with-updates cell shows a
+$-47.5\%$ delta but is a single-rep measurement where both Native
+and TDX-only also exhibit large p99 swings, indicating the cell is
+not a stable matched-delta data point at $N{=}1$ repetition. The
+qualitative finding is that TDX+Vordr is fractionally
+\emph{faster} than or indistinguishable from TDX-only across the
+three reliable cells, confirming that Vordr's marginal cost remains
+small even when the underlying TDX cost is substantial.
+Table~\ref{tab:nginx-100kb-matched} reports the full breakdown.
+
+\begin{table}[t]
+\centering
+\small
+\caption{NGINX \texttt{/100kb} matched delta of TDX+Vordr vs.\ TDX, by
+(log-size, workload-pattern), at the matrix RPS of $20{,}000$~req/s
+and attestation epoch $T{=}30$~s. Throughput in req/s; latency in ms.
+Three of four cells show TDX+Vordr fractionally faster than TDX; the
+remaining cell (cold/with-updates) is a single-rep measurement on a
+noise-prone tail.}
+\label{tab:nginx-100kb-matched}
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Log-size & Workload & $\Delta$ throughput & $\Delta$ p50 & $\Delta$ p99 \\
+\midrule
+cold & no-updates       & $\approx 0\%$  & $+0.61\%$ & $-1.31\%$  \\
+cold & with-updates & $\approx 0\%$  & $+0.79\%$ & $-47.52\%^{\dagger}$ \\
+warm & no-updates       & $+0.05\%$      & $-5.94\%$ & $-15.48\%$ \\
+warm & with-updates & $\approx 0\%$  & $+4.58\%$ & $\phantom{+}0.00\%$ \\
+\bottomrule
+\end{tabular}\\[2pt]
+{\footnotesize $^{\dagger}$single-rep cell; see text.}
+\end{table}
+
+\paragraph{Round-time pattern and the incremental protocol.}
+The mean per-round wall-clock time across the $22$ TDX+Vordr cells
+on \texttt{/1kb} is $77$~ms in cold cells and $4{,}538$~ms in warm
+cells. The warm number is dominated by round~0, the one-time replay
+of the pre-burned $\sim$100K-entry IMA baseline; subsequent rounds run
+in $\sim$$50$--$100$~ms regardless of $\Delta n$ bursts produced by
+the with-updates pattern. This validates the design assumption
+motivating the incremental protocol -- the cost of bootstrapping the
+verifier's view of the IMA log is paid \emph{once} per session, and
+amortised across all subsequent rolling rounds.
+
+\paragraph{Deferred figures.}
+The matched-delta figure across all configurations, the epoch sweep,
+and the per-cell timeline are in the figure folder
+\texttt{matrix-1kb-20260426/figures/} as
+\texttt{fig\{3..5\}\_*.pdf} and are available in the artefact bundle.

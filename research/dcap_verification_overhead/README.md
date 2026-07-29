@@ -143,7 +143,7 @@ ratios.
 
 ## Interpreting the results
 
-- **Steady-state overhead** lives in the p50 / mean. Gramine-SGX
+- **Post-warm-up overhead** lives in the p50 / mean. Gramine-SGX
   Python adds ECALL/OCALL transition cost on every library call and
   paging cost if the working set exceeds EPC. Typical published
   numbers: 1.1× – 2× on pure-CPU crypto workloads.
@@ -153,7 +153,7 @@ ratios.
 - **The first iteration** in the `sgx` run is the one most affected
   by cold caches (Intel DCAP library collateral, PCK cert parsing,
   etc.). The 50-iter warmup discards this so your reported mean/p50
-  reflects steady state. If you *want* to also report the cold-start
+  reflects post-warm-up execution. If you *want* to also report the cold-start
   number, check the first line of `results_sgx.csv` after the warmup
   (or re-run with `--warmup 0`).
 - **Enclave bring-up time** is NOT measured here — it is a one-time

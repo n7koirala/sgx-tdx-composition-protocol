@@ -18,8 +18,10 @@ CCS paper.
 - **Attestation epoch** `T`: 15, 30, 60, 300 s
 - **Baseline IMA log**: `cold` (~5–10 K entries, just-booted) or `warm`
   (~100 K, pre-burned via `generate_ima_baseline.py --target 100000`)
-- **Update interleaving**: `steady` or `with-updates`
-  (apt install at t+120 s, pip install at t+300 s of the measurement window)
+- **Update interleaving**: `no-updates` or `with-updates`
+  - `no-updates` allows normal workload and service activity but performs no
+    intentional software installation during the measurement window.
+  - `with-updates` additionally runs apt at t+120 s and pip at t+300 s.
 
 `native` and `tdx-only` run only the log-size × interleaving matrix (4 cells
 each); `tdx-vordr` runs the full 4 × 2 × 2 = 16 cells. 24 runs total per model.
@@ -131,7 +133,7 @@ evaluation/results/llm/<timestamp>/
 Six figures matching the style of `research/incremental_attestation/charts_final/`:
 
 1. **`fig1_throughput_by_condition.pdf`** — bars: req/s and out-tok/s for
-   native / tdx-only / tdx-vordr × steady / with-updates (epoch=30 s).
+   native / tdx-only / tdx-vordr × no-updates / with-updates (epoch=30 s).
 2. **`fig2_ttft_tail_by_condition.pdf`** — p50 / p95 / p99 TTFT, same grouping.
 3. **`fig3_epoch_sweep.pdf`** — twin-axis line plot: throughput and p99 TTFT
    overhead (%) vs epoch (log x), one curve per log size.

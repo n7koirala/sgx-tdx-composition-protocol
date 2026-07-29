@@ -196,14 +196,14 @@ def print_summary(full_results, inc_results):
 
         # Skip round 1 for incremental (it's the same as full replay)
         if label == "Incremental" and len(results) > 1:
-            steady = results[1:]  # rounds 2+ are steady state
+            post_warmup_results = results[1:]  # rounds 2+ are post-warm-up execution
         else:
-            steady = results
+            post_warmup_results = results
 
-        totals = [r['t_total_ms'] for r in steady]
-        responses = [r['t_response_ms'] for r in steady]
-        ima_data = [r['ima_data_kb'] for r in steady]
-        ima_entries = [r['ima_entries'] for r in steady]
+        totals = [r['t_total_ms'] for r in post_warmup_results]
+        responses = [r['t_response_ms'] for r in post_warmup_results]
+        ima_data = [r['ima_data_kb'] for r in post_warmup_results]
+        ima_entries = [r['ima_entries'] for r in post_warmup_results]
 
         print(f"\n  {label} (rounds {2 if label == 'Incremental' and len(results) > 1 else 1}-{len(results)}):")
         print(f"    Total time:    {statistics.mean(totals):>9.1f} ms  (±{statistics.stdev(totals):.1f})" if len(totals) > 1 else f"    Total time:    {totals[0]:>9.1f} ms")
@@ -220,7 +220,7 @@ def print_summary(full_results, inc_results):
         inc_data = statistics.mean(r['ima_data_kb'] for r in inc_results[1:])
         data_reduction = (1 - inc_data / full_data) * 100 if full_data > 0 else 0
 
-        print(f"\n  Comparison (steady-state incremental vs full replay):")
+        print(f"\n  Comparison (post-warm-up incremental vs full replay):")
         print(f"    Speedup:        {speedup:>8.1f}x")
         print(f"    Data reduction: {data_reduction:>8.1f}%")
 
@@ -259,7 +259,7 @@ def print_latex(full_results, inc_results):
               f"{f_resp:,.1f} & {f_total:,.1f} & $1\\times$ \\\\")
 
     if inc_results and len(inc_results) > 1:
-        ir = inc_results[1:]  # steady state
+        ir = inc_results[1:]  # post-warm-up execution
         i_ent = statistics.mean(r['ima_entries'] for r in ir)
         i_data = statistics.mean(r['ima_data_kb'] for r in ir)
         i_resp = statistics.mean(r['t_response_ms'] for r in ir)

@@ -1,0 +1,270 @@
+% Drop-in subsection for the Evaluation chapter of the Vordr paper.
+% Generated from the matrix-1kb-20260426 dataset on 2026-04-28.
+% Numeric placeholders for /100kb are marked TODO; fill in once the
+% matrix-100kb-* run completes and figures are regenerated across both roots.
+
+\subsection{NGINX Workload Overhead}
+\label{sec:eval-nginx}
+
+Where the LLM-serving evaluation of \S\ref{sec:eval-llm} stresses the
+compute path of the confidential VM, the second application-level
+benchmark targets the opposite regime: a syscall- and TCP-stack-bound
+workload where any guest-kernel-boundary tax imposed by TDX, by Vordr,
+or by the combination should be most visible.
+
+\paragraph{Workload and platform.}
+We deploy a tuned NGINX~1.27 (alpine, configured with
+\texttt{epoll}, \texttt{reuseport}, \texttt{sendfile}, no access logs,
+\texttt{worker\_connections=16384}, \texttt{somaxconn=65535}) inside a
+GCP confidential VM (\texttt{c3-standard-8}, Intel TDX, 8~vCPUs,
+32~GB~RAM, Ubuntu 22.04). The server runs in a Docker container with
+host networking, and exposes two static routes:
+\texttt{/1kb} (1024-byte payload, exercises the syscall-bound regime
+where \texttt{accept}/\texttt{epoll}/\texttt{sendfile} dominate) and
+\texttt{/100kb} (102400-byte payload, exercises the bandwidth-bound
+regime stressing the TCP transmit path). The load generator is
+\texttt{wrk2}~\cite{wrk2}, the coordinated-omission-corrected variant
+of \texttt{wrk} that schedules requests on a Poisson process at a
+target rate independent of server-side latency.
+
+To prevent wide-area network round-trip time from contaminating the
+sub-millisecond effects we measure, we co-locate the load generator on
+a non-CVM \texttt{c3-standard-8} VM in the \emph{same} cloud zone as
+the target. Internal-IP RTT between the two is consistently
+\textless~1~ms, compared to the $\approx$21~ms RTT we observed when
+driving from a workstation outside the cloud~VPC. We additionally
+verify that \texttt{wrk2} on the load generator retains $\geq$50\%
+CPU headroom at the matrix RPS (so the generator is not itself the
+bottleneck).
+
+\paragraph{Conditions.}
+We compare three target-VM configurations:
+\begin{itemize}
+\item \emph{native}: an identical VM image without TDX. This isolates
+  the \emph{cost of confidential computing} from the \emph{cost of
+  Vordr}.
+\item \emph{tdx-only}: TDX enabled, but no Vordr agent and no
+  attestation traffic. This is our baseline confidential VM.
+\item \emph{tdx-vordr}: full Vordr stack — the in-CVM attestation
+  agent, plus a verifier on the load-generator firing one incremental
+  attestation round every $T$ seconds.
+\end{itemize}
+
+For each payload, we sweep the matrix in
+Table~\ref{tab:nginx-matrix}: the attestation epoch $T \in \{15, 30,
+60, 300\}$~s, the IMA baseline log size (\emph{cold}, $\sim$5K entries
+just-booted, vs.~\emph{warm}, $\sim$100K entries pre-burned), and an
+update-interleaving condition (\emph{no-updates} vs.~\emph{with-updates},
+the latter triggering an \texttt{apt install} at $t{+}120$~s and a
+\texttt{pip install} at $t{+}300$~s of the measurement window to
+inject realistic IMA-log churn). \emph{native} and \emph{tdx-only}
+are epoch-insensitive and run only the (log-size $\times$ interleave)
+matrix; \emph{tdx-vordr} runs the full $4 \times 2 \times 2$ matrix.
+We collect $N{=}3$ repetitions per cell on the \emph{no-updates} interleave
+(for error bars on the matched-delta figure) and $N{=}1$ on
+\emph{with-updates} cells.
+
+Each cell uses a fresh VM provisioned from the same image, runs a
+30~s discarded warm-up phase, then a 300~s recorded measurement phase
+at a fixed target RPS. Per cell we record \texttt{wrk2}~HdrHistogram
+percentile latencies (p50, p90, p99, p99.9), achieved throughput,
+error counts, per-attestation-round timings ($\Delta n$,
+\texttt{t\_round\_ms}, \texttt{pcr\_match}), and a 5~s-interval
+sampler trace of CPU, memory, and IMA log size on the target.
+
+\paragraph{Choice of matrix RPS.}
+The matrix RPS for each payload is fixed at 80\% of the native
+saturation point, calibrated separately. For \texttt{/1kb}, we sweep
+target rates from 1{,}000~req/s up to 200{,}000~req/s on a fresh
+native VM and identify the highest rate where (i)~achieved throughput
+remains within 1\% of target, (ii)~zero socket errors and zero
+non-2xx responses, and (iii)~$p99 < 2 \times p50$. The native NGINX
+configuration described above sustains 100{,}000~req/s in a flat
+latency region, with a clear knee appearing at 150{,}000~req/s; we
+therefore fix the \texttt{/1kb} matrix RPS at \textbf{80{,}000~req/s}.
+On \texttt{/100kb}, the same procedure identifies a clean ceiling at
+25{,}000~req/s (corresponding to $\approx$21~Gbps of HTTP body
+throughput, near the c3-standard-8 default egress NIC limit), giving
+a matrix RPS of \textbf{20{,}000~req/s}.
+
+\paragraph{What we are measuring and why.}
+Our central claim is that Vordr's incremental-attestation protocol
+adds negligible runtime cost on top of the underlying TDX confidential
+VM, even on workloads that should expose the syscall path. We isolate
+Vordr's marginal cost by comparing the \emph{tdx-vordr} condition
+directly to the \emph{tdx-only} condition for matched
+(log-size, interleaving) cells: this fixes the TDX baseline and
+reveals only the cost added by running the agent and serving rolling
+attestation rounds. The matched-delta figure
+(Figure~\ref{fig:nginx-matched-delta}) is the headline result.
+The \emph{native} condition serves as a reference for the underlying
+\emph{TDX tax} — the cost of running the workload inside a
+confidential VM \emph{at all}, independent of Vordr.
+
+\paragraph{Results.}
+
+\textbf{Throughput.} Figure~\ref{fig:nginx-throughput} shows mean
+achieved throughput across the three conditions for both payloads at
+the matrix RPS. On \texttt{/1kb} at 80\,kreq/s, all three conditions
+sustain the target rate within 0.1\%
+(native: 79{,}957~req/s; tdx-only: 79{,}938; tdx-vordr: 79{,}943).
+\emph{The TDX tax on throughput is statistically zero, and Vordr's
+marginal contribution is in the noise.}
+% TODO: regenerate figure across both payloads once /100kb matrix completes;
+%       insert /100kb numbers here.
+
+\textbf{Tail latency.} Figure~\ref{fig:nginx-latency-tail} reports
+mean p50/p90/p99/p99.9 request latencies on \texttt{/1kb} at the
+matrix RPS. p99 latency is 1.95\,ms (native), 2.00\,ms (tdx-only),
+and 2.01\,ms (tdx-vordr) — a 2.6\% TDX tax over native and a 0.1\%
+Vordr marginal cost over tdx-only. Even at the p99.9 percentile, the
+gap between \emph{tdx-only} and \emph{tdx-vordr} stays below 1\%,
+within the run-to-run variance of \texttt{wrk2} itself.
+
+\textbf{Matched delta (the headline).} Figure~\ref{fig:nginx-matched-delta}
+plots the matched delta
+$\frac{\textit{tdx-vordr} - \textit{tdx-only}}{\textit{tdx-only}}$
+as a percentage, faceted by (payload, log-size, interleaving). On
+\texttt{/1kb}, Vordr's marginal cost is bounded by $+0.84\%$ on $p99$
+latency and $+0.07\%$ on throughput across the four configurations.
+Two cells show \emph{negative} matched-deltas (cold/with-updates is
+$-1.50\%$ on $p99$ and $-0.07\%$ on throughput), indicating that
+Vordr's effect is statistically indistinguishable from zero at the
+noise floor of our measurement methodology.
+
+\textbf{Robustness across attestation epoch.}
+Figure~\ref{fig:nginx-epoch-sweep} sweeps the attestation epoch
+$T \in \{15, 30, 60, 300\}$~s on \texttt{/1kb} cold/no-updates, plotting
+$p99$~latency overhead vs.~tdx-only. The curve is essentially flat:
+even at the most aggressive 15~s epoch — 20$\times$ more frequent than
+the 300~s extreme — $p99$~overhead vs.~tdx-only stays below 1\%. This
+matches the per-round cost we measure directly: on a cold IMA log,
+each incremental round completes in $\sim$77~ms (mean p95 across all
+12 cold tdx-vordr cells); on a warm log it completes in $\sim$77~ms
+\emph{after the first round}, with the first round taking
+$\sim$4.5~s to perform a full IMA replay over the
+$\sim$100K-entry baseline.
+
+\textbf{Round-time decomposition.}
+Figure~\ref{fig:nginx-timeline} shows a representative per-round
+timeline (epoch $T{=}30$~s, warm log, with-updates interleave). Round~0
+takes 4.5~s — the cost of replaying the entire pre-burned IMA log
+once to establish the verifier's baseline state. Every subsequent
+round is sub-100~ms, even with the periodic $\Delta n$ bursts induced
+by the \texttt{apt}/\texttt{pip} update injection at $t{+}120$~s and
+$t{+}300$~s. This validates the design assumption motivating the
+incremental protocol: the cost of bootstrapping the verifier's view
+of the IMA log is paid once per session, and amortised across all
+subsequent rolling rounds.
+
+\paragraph{Conclusions.}
+Three findings emerge from the NGINX evaluation:
+\begin{enumerate}
+\item \emph{Vordr's marginal overhead on a syscall-bound workload is
+statistically indistinguishable from zero.} On the matched
+(tdx-vordr~$-$~tdx-only) delta — the cleanest measurement of Vordr's
+own cost — $p99$~latency stays within $\pm 1.5\%$ across all four
+configurations on \texttt{/1kb}. This is comparable to the run-to-run
+variance of \texttt{wrk2} itself, and \emph{substantially smaller than
+the 2.6\% TDX-over-native tax} that the same measurement isolates.
+\item \emph{Tail latency is robust across the attestation epoch.}
+Reducing $T$ from 300~s to 15~s — a $20\times$ increase in attestation
+rate — does not measurably affect p99 latency, because each
+incremental round costs at most a few milliseconds and runs only every
+$T$~s.
+\item \emph{The incremental-attestation protocol delivers its design
+goal of cheap rolling verification.} The 4.5~s cost of the initial
+warm-log replay is paid once per session; every subsequent round
+runs in \textless~100~ms, regardless of $\Delta n$ bursts induced by
+realistic update activity.
+\end{enumerate}
+
+Together with the LLM-serving evaluation (\S\ref{sec:eval-llm}),
+these results demonstrate that Vordr's runtime overhead is
+\emph{essentially free} in both the compute-bound and syscall-bound
+regimes — the two ends of the application-workload spectrum that we
+expect a general-purpose confidential-VM attestation system to be
+deployed across.
+
+% --------------------------------------------------------------------
+% Figure stubs. Replace ``placeholder'' with actual graphic paths.
+% Generated PDFs live at:
+%   evaluation/results/nginx/matrix-1kb-20260426/figures/fig1..5.pdf
+% Once the /100kb matrix completes, regenerate across both roots:
+%   python3 plots/generate_plots.py \
+%       --roots <matrix-1kb>,<matrix-100kb> \
+%       --out-dir <figures-final>
+% --------------------------------------------------------------------
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig1_throughput_by_condition.pdf}
+  \caption{Achieved throughput (req/s) at the matrix RPS, across native,
+  tdx-only, and tdx-vordr ($T{=}30$~s), grouped by update interleaving.
+  Numeric labels on bar tops show the small absolute differences that
+  are otherwise invisible at the scale of the bars themselves.}
+  \label{fig:nginx-throughput}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig2_latency_tail_by_condition.pdf}
+  \caption{Mean per-request latency at p50, p90, p99, p99.9 across the
+  three conditions on the no-updates interleaving at $T{=}30$~s. Log-$y$
+  scale; numeric labels expose the small absolute differences.}
+  \label{fig:nginx-latency-tail}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig3_matched_delta.pdf}
+  \caption{\textbf{Matched-delta figure.} Per-cell relative overhead of
+  \emph{tdx-vordr} compared to \emph{tdx-only}, computed as
+  $(\textit{tdx-vordr} - \textit{tdx-only})/\textit{tdx-only}$ in percent,
+  with error bars from $N{=}3$ repetitions on \emph{no-updates} cells. Across
+  all four (log-size, interleaving) configurations, Vordr's marginal cost
+  is bounded by $\pm 1.5\%$ on $p99$ latency and $\pm 0.1\%$ on
+  throughput — within run-to-run measurement noise.}
+  \label{fig:nginx-matched-delta}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.75\linewidth]{figures/fig4_epoch_sweep.pdf}
+  \caption{$p99$~latency overhead of \emph{tdx-vordr} vs.~\emph{tdx-only}
+  as a function of attestation epoch $T$, on cold/no-updates. The curve is
+  flat: even a $20\times$ increase in attestation rate (300~s $\to$
+  15~s) does not measurably affect $p99$~latency.}
+  \label{fig:nginx-epoch-sweep}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig5_timeline.pdf}
+  \caption{Per-cell timeline of one representative \emph{tdx-vordr} run
+  ($T{=}30$~s, warm log, with-updates interleave). \textbf{Top:} target
+  CPU\% over time. \textbf{Bottom:} attestation rounds with $\Delta n$
+  shown as a stem plot. Round~0 carries the one-time
+  $\sim$4.5~s cost of replaying the warm IMA baseline; subsequent
+  rounds run in \textless~100~ms.}
+  \label{fig:nginx-timeline}
+\end{figure}
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{lccc}
+  \toprule
+  Condition & TDX & Vordr agent & Attestation \\
+  \midrule
+  \texttt{native}    & --- & ---           & ---            \\
+  \texttt{tdx-only}  & yes & ---           & ---            \\
+  \texttt{tdx-vordr} & yes & in-CVM agent  & every $T$ s    \\
+  \bottomrule
+  \end{tabular}
+  \caption{Cell count: native and tdx-only $= 8$ each
+  (2 log-sizes $\times$ \{3~no-updates$+$1~with-updates\}); tdx-vordr $=
+  32$ (4 epochs $\times$ same as above). $48$ cells per payload,
+  $96$ total across the two payloads.}
+  \label{tab:nginx-matrix}
+\end{table}

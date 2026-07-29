@@ -3,7 +3,7 @@
 Update injector for the LLM-workload evaluation.
 
 Fires two realistic package-install events during the measurement window
-to exercise the "steady-state with periodic ASP updates" interleaving:
+to exercise the "with-updates" interleaving with periodic ASP updates:
 
     t =  120s: apt-get install -y $APT_PKG
     t =  300s: pip install --no-deps --target /tmp/pipcache $PIP_PKG

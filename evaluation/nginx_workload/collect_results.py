@@ -1,44 +1,47 @@
 #!/usr/bin/env python3
 """
-Join vllm.json + attest.csv + sampler.csv from a single run directory
-into a per-run summary.json plus a master table across all runs found
-under a root results directory.
+Joins wrk.json + attest.csv + sampler.csv from each cell directory under
+--root into a per-cell summary.json plus a flat all_runs.csv at the root.
 
-Per-run summary (summary.json):
-    {
-      "run": { ...contents of run.json... },
-      "latency": {
-          "ttft_ms": {"mean":..., "p50":..., "p95":..., "p99":...},
-          "itl_ms":  {"mean":..., "p50":..., "p95":..., "p99":...},
-          "e2e_ms":  {"mean":..., "p50":..., "p95":..., "p99":...}
-      },
-      "throughput": {
-          "request_per_s": ..., "output_token_per_s": ...
-      },
-      "attestation": {
-          "rounds": N, "delta_n": {"mean":..., "p50":..., "p95":..., "max":...},
-          "t_round_ms": {"mean":..., "p95":..., "max":...},
-          "pcr_mismatches": 0
-      },
-      "ima": {
-          "entries_start": N0, "entries_end": N1,
-          "growth_per_min": ...
-      }
+Per-cell summary.json:
+  {
+    "run": { ...contents of run.json, plus rep extracted from path... },
+    "wrk": {
+        "completed": int,
+        "duration_sec": float,
+        "throughput": {"request_per_s": ..., "transfer_bytes_per_s": ..., "bytes_total": ...},
+        "latency": {"request_ms": {mean, p50, p95, p99, p999, max, ...}},
+        "errors": {connect, read, write, timeout, non2xx_3xx}
+    },
+    "attest": {
+        "rounds": N,
+        "delta_n":  {mean, p50, p95, max},
+        "t_round_ms": {mean, p95, max},
+        "t_server_read_ms": {mean, p95, max},
+        "pcr_mismatches": int
+    },
+    "sampler": {
+        "samples": N,
+        "ima_entries_start": ..., "ima_entries_end": ...,
+        "ima_growth_per_min": ...
     }
-
-Also writes all_runs.csv (one row per run) at the root to drive plots.
+  }
 
 Usage:
-    python3 collect_results.py --root ../results/llm/2026-04-21T14-00
+    python3 collect_results.py --root ../results/nginx/matrix-1kb-20260426
 """
 
 import argparse
 import csv
 import json
 import os
+import re
 import statistics
 import sys
 from glob import glob
+
+
+REP_RE = re.compile(r"_rep(\d+)$")
 
 
 def q(values, p):
@@ -61,53 +64,35 @@ def stats(values):
     }
 
 
-def summarize_vllm(path):
+def summarize_wrk(path):
     if not os.path.exists(path):
         return None
     with open(path) as f:
         doc = json.load(f)
 
-    # vLLM v0.6.3 benchmark_serving.py emits per-request ttfts[]/itls[] in
-    # SECONDS, and canonical aggregate fields in MS (mean_ttft_ms etc).
-    # Prefer the canonical fields; only derive p95/max ourselves.
-    def sec_array_to_ms(vs):
-        if not vs:
-            return []
-        if isinstance(vs, list) and vs and isinstance(vs[0], list):
-            vs = [x for sub in vs for x in sub]
-        return [v * 1000.0 for v in vs]
-
-    ttft_ms_arr = sec_array_to_ms(doc.get("ttfts") or [])
-    itl_ms_arr  = sec_array_to_ms(doc.get("itls") or [])
-    e2e_ms_arr  = sec_array_to_ms(doc.get("e2e_latencies") or [])
-
-    def hybrid(aggr_prefix, arr):
-        # Use canonical {mean,median,p99}_<prefix>_ms when present; fill
-        # p95/max by percentile over the per-request array.
-        out = {
-            "mean": doc.get(f"mean_{aggr_prefix}_ms"),
-            "p50":  doc.get(f"median_{aggr_prefix}_ms"),
-            "p95":  round(q(arr, 0.95), 3) if arr else None,
-            "p99":  doc.get(f"p99_{aggr_prefix}_ms"),
-            "max":  round(max(arr), 3) if arr else None,
-        }
-        # Fall back to array stats if canonical fields are missing.
-        if out["mean"] is None and arr:
-            out = stats(arr)
-        return out
-
+    lat = doc.get("latency_ms") or {}
     return {
-        "latency": {
-            "ttft_ms": hybrid("ttft", ttft_ms_arr),
-            "itl_ms":  hybrid("itl",  itl_ms_arr),
-            "e2e_ms":  stats(e2e_ms_arr),
-        },
-        "throughput": {
-            "request_per_s":      doc.get("request_throughput"),
-            "output_token_per_s": doc.get("output_throughput"),
-            "total_token_per_s":  doc.get("total_token_throughput"),
-        },
         "completed": doc.get("completed"),
+        "duration_sec": doc.get("duration_sec"),
+        "throughput": {
+            "request_per_s":         doc.get("request_throughput"),
+            "transfer_bytes_per_s":  doc.get("transfer_per_sec_bytes"),
+            "bytes_total":           doc.get("bytes_total"),
+        },
+        "latency": {
+            "request_ms": {
+                "mean":  lat.get("mean"),
+                "stdev": lat.get("stdev"),
+                "p50":   lat.get("p50"),
+                "p75":   lat.get("p75"),
+                "p90":   lat.get("p90"),
+                "p99":   lat.get("p99"),
+                "p999":  lat.get("p999"),
+                "p9999": lat.get("p9999"),
+                "max":   lat.get("max"),
+            },
+        },
+        "errors": doc.get("errors") or {},
     }
 
 
@@ -127,6 +112,7 @@ def summarize_attest(path):
                     "t_server_ima_read_ms": float(row.get("t_server_ima_read_ms") or 0),
                     "ima_data_kb": float(row.get("ima_data_kb") or 0),
                     "pcr_match": row.get("pcr_match") == "True",
+                    "runtime_verdict": row.get("runtime_verdict") or "",
                 })
             except ValueError:
                 continue
@@ -134,23 +120,32 @@ def summarize_attest(path):
     if not rounds:
         return {"rounds": 0}
 
-    dns = [r["delta_n"] for r in rounds]
-    tots = [r["t_total_ms"] for r in rounds]
-    srv = [r["t_server_ima_read_ms"] for r in rounds]
+    # A real PCR mismatch only counts when there were new IMA entries to
+    # verify (Δn > 0) AND pcr_match is False. When Δn=0 the agent reports
+    # pcr_match=False because the field doesn't apply (verdict is
+    # CLEAN_NO_DELTA), and counting that as a security failure inflates
+    # the mismatch number meaninglessly.
+    real_mismatches = sum(
+        1 for r in rounds
+        if r["delta_n"] > 0 and not r["pcr_match"]
+    )
+    no_delta_rounds = sum(1 for r in rounds if r["delta_n"] == 0)
+
     return {
         "rounds": len(rounds),
-        "delta_n": stats(dns),
-        "t_round_ms": stats(tots),
-        "t_server_read_ms": stats(srv),
-        "pcr_mismatches": sum(1 for r in rounds if not r["pcr_match"]),
+        "rounds_with_delta": len(rounds) - no_delta_rounds,
+        "rounds_no_delta": no_delta_rounds,
+        "delta_n":          stats([r["delta_n"] for r in rounds]),
+        "t_round_ms":       stats([r["t_total_ms"] for r in rounds]),
+        "t_server_read_ms": stats([r["t_server_ima_read_ms"] for r in rounds]),
+        "pcr_mismatches":   real_mismatches,
     }
 
 
-def summarize_sampler(path, run_meta):
+def summarize_sampler(path):
     if not os.path.exists(path):
         return None
-    counts = []
-    ts = []
+    counts, ts = [], []
     with open(path) as f:
         r = csv.DictReader(f)
         for row in r:
@@ -166,8 +161,8 @@ def summarize_sampler(path, run_meta):
     if len(counts) < 2:
         return {"samples": len(counts)}
 
-    total_span_min = (ts[-1] - ts[0]) / 60.0
-    growth = (counts[-1] - counts[0]) / max(total_span_min, 1e-6)
+    span_min = (ts[-1] - ts[0]) / 60.0
+    growth = (counts[-1] - counts[0]) / max(span_min, 1e-6)
     return {
         "samples": len(counts),
         "ima_entries_start": counts[0],
@@ -176,44 +171,56 @@ def summarize_sampler(path, run_meta):
     }
 
 
+def extract_rep_from_path(run_dir):
+    m = REP_RE.search(os.path.basename(run_dir))
+    return int(m.group(1)) if m else 1
+
+
 def summarize_run(run_dir):
     manifest = os.path.join(run_dir, "run.json")
     if not os.path.exists(manifest):
         return None
     with open(manifest) as f:
         run = json.load(f)
+    run["rep"] = extract_rep_from_path(run_dir)
 
-    s = {"run_dir": run_dir, "run": run}
-    s["vllm"] = summarize_vllm(os.path.join(run_dir, "vllm.json"))
-    s["attest"] = summarize_attest(os.path.join(run_dir, "attest.csv"))
-    s["sampler"] = summarize_sampler(os.path.join(run_dir, "sampler.csv"), run)
-    return s
+    return {
+        "run_dir": run_dir,
+        "run": run,
+        "wrk":     summarize_wrk(os.path.join(run_dir, "wrk.json")),
+        "attest":  summarize_attest(os.path.join(run_dir, "attest.csv")),
+        "sampler": summarize_sampler(os.path.join(run_dir, "sampler.csv")),
+    }
 
 
 def flatten_row(s):
     r = s["run"]
-    v = s.get("vllm") or {}
+    w = s.get("wrk") or {}
     a = s.get("attest") or {}
     sm = s.get("sampler") or {}
-    lat = (v.get("latency") or {})
-    tp = (v.get("throughput") or {})
+    lat = ((w.get("latency") or {}).get("request_ms") or {})
+    tp = (w.get("throughput") or {})
+    err = (w.get("errors") or {})
     return {
         "run_dir": s["run_dir"],
         "condition": r.get("condition"),
-        "model_key": r.get("model_key"),
+        "payload": r.get("payload"),
         "epoch_sec": r.get("epoch_sec"),
         "log_size": r.get("log_size"),
         "interleave": r.get("interleave"),
-        "rps": r.get("rps"),
+        "rep": r.get("rep"),
+        "rps_target": r.get("rps"),
         "duration_sec": r.get("duration_sec"),
+        "completed": w.get("completed"),
         "req_per_s": tp.get("request_per_s"),
-        "out_tok_per_s": tp.get("output_token_per_s"),
-        "ttft_p50_ms": (lat.get("ttft_ms") or {}).get("p50"),
-        "ttft_p95_ms": (lat.get("ttft_ms") or {}).get("p95"),
-        "ttft_p99_ms": (lat.get("ttft_ms") or {}).get("p99"),
-        "itl_p50_ms":  (lat.get("itl_ms") or {}).get("p50"),
-        "itl_p95_ms":  (lat.get("itl_ms") or {}).get("p95"),
-        "itl_p99_ms":  (lat.get("itl_ms") or {}).get("p99"),
+        "bytes_per_s": tp.get("transfer_bytes_per_s"),
+        "lat_p50_ms":  lat.get("p50"),
+        "lat_p90_ms":  lat.get("p90"),
+        "lat_p99_ms":  lat.get("p99"),
+        "lat_p999_ms": lat.get("p999"),
+        "lat_max_ms":  lat.get("max"),
+        "errors_timeout": err.get("timeout"),
+        "errors_non2xx":  err.get("non2xx_3xx"),
         "attest_rounds": a.get("rounds"),
         "delta_n_p50": (a.get("delta_n") or {}).get("p50"),
         "delta_n_p95": (a.get("delta_n") or {}).get("p95"),
@@ -228,7 +235,7 @@ def flatten_row(s):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True,
-                    help="Root results directory (contains one subdir per run)")
+                    help="Root results directory (contains <condition>/<tag>/run.json)")
     args = ap.parse_args()
 
     runs = []
@@ -245,7 +252,7 @@ def main():
             print(f"[collect] failed {run_dir}: {e}", file=sys.stderr)
 
     if not runs:
-        print("[collect] no runs found under", args.root, file=sys.stderr)
+        print(f"[collect] no runs under {args.root}", file=sys.stderr)
         sys.exit(1)
 
     rows = [flatten_row(r) for r in runs]

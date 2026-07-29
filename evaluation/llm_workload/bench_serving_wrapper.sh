@@ -24,6 +24,7 @@ DURATION_SEC=300
 OUT=""
 VLLM_SRC="${VLLM_SRC:-$HOME/vllm}"
 DATASET_DIR="${DATASET_DIR:-$HOME/datasets}"
+NUM_PROMPTS_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
         --rps) RPS="$2"; shift 2 ;;
         --warmup-sec) WARMUP_SEC="$2"; shift 2 ;;
         --duration-sec) DURATION_SEC="$2"; shift 2 ;;
+        --num-prompts) NUM_PROMPTS_OVERRIDE="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
         --vllm-src) VLLM_SRC="$2"; shift 2 ;;
         --dataset-dir) DATASET_DIR="$2"; shift 2 ;;
@@ -45,9 +47,10 @@ for v in HOST MODEL_KEY RPS OUT; do
 done
 
 case "$MODEL_KEY" in
-    llama31-8b) MODEL="TheBloke/Meta-Llama-3-8B-Instruct-AWQ" ;;
+    llama31-8b) MODEL="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4" ;;
     phi3-mini)  MODEL="microsoft/Phi-3-mini-4k-instruct" ;;
-    *) echo "--model-key must be llama31-8b or phi3-mini" >&2; exit 2 ;;
+    qwen25-7b)  MODEL="Qwen/Qwen2.5-7B-Instruct-AWQ" ;;
+    *) echo "--model-key must be llama31-8b, phi3-mini, or qwen25-7b" >&2; exit 2 ;;
 esac
 
 SHAREGPT="$DATASET_DIR/ShareGPT_V3_unfiltered_cleaned_split.json"
@@ -66,8 +69,15 @@ if [[ ! -f "$BENCH" ]]; then
 fi
 
 # Poisson open-loop. benchmark_serving.py expects --request-rate (req/s)
-# and --num-prompts total. We convert wall-clock duration → prompt count.
-NUM_PROMPTS=$(python3 -c "import math; print(max(1, int(math.ceil($RPS * ($WARMUP_SEC + $DURATION_SEC)))))")
+# and --num-prompts total. We convert wall-clock duration → prompt count,
+# which assumes the server can keep up with arrival rate. On CPU that's
+# often wrong (bench waits for every queued request to drain), so
+# --num-prompts lets callers override with a hard cap.
+if [[ -n "$NUM_PROMPTS_OVERRIDE" ]]; then
+    NUM_PROMPTS="$NUM_PROMPTS_OVERRIDE"
+else
+    NUM_PROMPTS=$(python3 -c "import math; print(max(1, int(math.ceil($RPS * ($WARMUP_SEC + $DURATION_SEC)))))")
+fi
 
 mkdir -p "$(dirname "$OUT")"
 echo "[bench] host=$HOST:$PORT model=$MODEL rps=$RPS n=$NUM_PROMPTS out=$OUT"
