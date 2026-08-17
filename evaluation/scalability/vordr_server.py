@@ -16,7 +16,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scale_common import compute_proof_mac, generate_nonce, recv_json, send_json
+# Gramine launches the Python entrypoint through an external wrapper, and in
+# practice that has not always preserved the script directory on sys.path.
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
+
+from scale_common import ResponseProofSigner, generate_nonce, recv_json, send_json
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +44,7 @@ class CachedTDXState:
     verification_time: float = 0.0
     refresh_count: int = 0
     last_refresh_ms: float = 0.0
+    cvm_update_in_progress: bool = False
     raw_quote: str = ""
     raw_quote_sha256: str = ""
     raw_quote_size: int = 0
@@ -47,6 +54,9 @@ class CachedTDXState:
     ima_entry_count: int = 0
     pcr10: str = ""
     pcr10_sha256: str = ""
+    runtime_evidence: dict[str, Any] = field(default_factory=dict)
+    runtime_evidence_sha256: str = ""
+    runtime_evidence_size: int = 0
     command_log: str = ""
     command_log_sha256: str = ""
     command_log_size: int = 0
@@ -165,16 +175,32 @@ class SyntheticRefreshBackend:
                 for i in range(self.synthetic_ima_entries)
             ]
             ima_log_text = "\n".join(ima_lines) + "\n"
+            ima_log_bytes = ima_log_text.encode("utf-8")
+            runtime_evidence = {
+                "version": "ima-rtmr3-vtpm-v2",
+                "ima_binary_log_b64": base64.b64encode(ima_log_bytes).decode("ascii"),
+                "ima_ascii_log_b64": base64.b64encode(ima_log_bytes).decode("ascii"),
+                "ima_entry_count": len(ima_lines),
+                "synthetic": True,
+            }
+            runtime_evidence_bytes = json.dumps(
+                runtime_evidence,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
             command_log = self.command_log_provider.snapshot()
             state.raw_quote = base64.b64encode(quote_bytes).decode("ascii")
             state.raw_quote_sha256 = sha256_hex(quote_bytes)
             state.raw_quote_size = len(quote_bytes)
-            state.ima_log = base64.b64encode(ima_log_text.encode("utf-8")).decode("ascii")
-            state.ima_log_sha256 = sha256_hex(ima_log_text.encode("utf-8"))
-            state.ima_log_size = len(ima_log_text.encode("utf-8"))
+            state.ima_log = runtime_evidence["ima_ascii_log_b64"]
+            state.ima_log_sha256 = sha256_hex(ima_log_bytes + ima_log_bytes)
+            state.ima_log_size = len(ima_log_bytes) * 2
             state.ima_entry_count = len(ima_lines)
             state.pcr10 = hashlib.sha256(ima_log_text.encode("utf-8")).hexdigest()
             state.pcr10_sha256 = sha256_hex(state.pcr10.encode("utf-8"))
+            state.runtime_evidence = runtime_evidence
+            state.runtime_evidence_sha256 = sha256_hex(runtime_evidence_bytes)
+            state.runtime_evidence_size = len(runtime_evidence_bytes)
             state.command_log = command_log.encoded
             state.command_log_sha256 = command_log.sha256
             state.command_log_size = command_log.size_bytes
@@ -193,6 +219,8 @@ class SGXVerifierRefreshBackend:
         method: str,
         verify_cert: bool,
         ca_cert: str | None,
+        evidence_mode: str = "light",
+        command_log_provider: FileCommandLogProvider | NullCommandLogProvider | None = None,
     ) -> None:
         sys.path.insert(0, str(SGX_TDX_ROOT / "sgx-verifier"))
         from sgx_tdx_verifier import SGXTDXVerifier  # type: ignore
@@ -203,28 +231,57 @@ class SGXVerifierRefreshBackend:
         self.method = method
         self.verify_cert = verify_cert
         self.ca_cert = ca_cert
+        self.evidence_mode = evidence_mode
+        self.command_log_provider = command_log_provider or NullCommandLogProvider()
 
-    def refresh(self, refresh_count: int) -> CachedTDXState:
-        verifier = self.SGXTDXVerifier(
+        checkpoint_id = hashlib.sha256(
+            f"scalability|{tdx_host}|{tdx_port}|{method}".encode("utf-8")
+        ).hexdigest()[:24]
+        checkpoint_file = (
+            "/app/research/sgx-tdx-attestation/runtime-state/"
+            f"sealed-checkpoints/scalability-{checkpoint_id}.checkpoint"
+        )
+        self.verifier = self.SGXTDXVerifier(
             tdx_host=self.tdx_host,
             tdx_port=self.tdx_port,
             method=self.method,
             verify_cert=self.verify_cert,
             ca_cert=self.ca_cert,
             verbose=False,
+            checkpoint_file=checkpoint_file,
+            checkpoint_namespace="scalability-vtpm-1.2",
         )
+
+    def refresh(self, refresh_count: int) -> CachedTDXState:
         start = time.perf_counter()
-        result = verifier.attest_tdx()
+        result = self.verifier.attest_tdx()
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        quote_material = (
-            f"{result.mrtd}:{result.verdict}:{result.verification_time_ms}:{refresh_count}"
-        ).encode("utf-8")
+        response = self.verifier.last_response
+        raw_quote_b64 = getattr(response, "raw_quote", "") if response else ""
+        raw_quote_bytes = (
+            base64.b64decode(raw_quote_b64)
+            if raw_quote_b64
+            else b""
+        )
+        runtime_evidence = getattr(response, "runtime_evidence", {}) if response else {}
+        runtime_evidence_bytes = (
+            json.dumps(runtime_evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            if runtime_evidence
+            else b""
+        )
+        command_log = self.command_log_provider.snapshot()
+        include_full = self.evidence_mode == "full"
+        ima_binary_b64 = runtime_evidence.get("ima_binary_log_b64", "")
+        ima_ascii_b64 = runtime_evidence.get("ima_ascii_log_b64", "")
+        ima_binary_bytes = base64.b64decode(ima_binary_b64) if ima_binary_b64 else b""
+        ima_ascii_bytes = base64.b64decode(ima_ascii_b64) if ima_ascii_b64 else b""
+        pcr10 = getattr(response, "pcr10", "") if response else ""
         return CachedTDXState(
             verified=result.verified,
             verdict=result.verdict or ("TRUSTED" if result.verified else "ERROR"),
             attestation_method=result.attestation_method or self.method,
             mrtd=result.mrtd,
-            quote_hash=hashlib.sha256(quote_material).hexdigest(),
+            quote_hash=sha256_hex(raw_quote_bytes) if raw_quote_bytes else "",
             tcb_status=result.tcb_status,
             is_debuggable=result.is_debuggable,
             ima_verified=result.ima_verified,
@@ -232,6 +289,22 @@ class SGXVerifierRefreshBackend:
             verification_time=time.time(),
             refresh_count=refresh_count,
             last_refresh_ms=elapsed_ms,
+            raw_quote=raw_quote_b64 if include_full else "",
+            raw_quote_sha256=sha256_hex(raw_quote_bytes) if raw_quote_bytes else "",
+            raw_quote_size=len(raw_quote_bytes),
+            ima_log=ima_ascii_b64 if include_full else "",
+            ima_log_sha256=sha256_hex(ima_binary_bytes + ima_ascii_bytes) if runtime_evidence else "",
+            ima_log_size=len(ima_binary_bytes) + len(ima_ascii_bytes),
+            pcr10=pcr10 if include_full else "",
+            pcr10_sha256=sha256_hex(pcr10.encode("utf-8")) if pcr10 else "",
+            runtime_evidence=runtime_evidence if include_full else {},
+            runtime_evidence_sha256=sha256_hex(runtime_evidence_bytes) if runtime_evidence_bytes else "",
+            runtime_evidence_size=len(runtime_evidence_bytes),
+            command_log=command_log.encoded if include_full else "",
+            command_log_sha256=command_log.sha256,
+            command_log_size=command_log.size_bytes,
+            command_log_entries=command_log.entry_count,
+            command_log_format=command_log.log_format,
             ima_entry_count=result.ima_entry_count,
             warnings=list(result.warnings),
             error=result.error,
@@ -239,7 +312,11 @@ class SGXVerifierRefreshBackend:
 
 
 class FullEvidenceTDXRefreshBackend:
-    """Refresh backend that fetches and verifies the full TDX evidence bundle."""
+    """Legacy protocol <=1.1 full-evidence collector.
+
+    Protocol 1.2 runs real refreshes through SGXVerifierRefreshBackend so audit
+    responses reuse the exact composed evidence already accepted by the WEN.
+    """
 
     def __init__(
         self,
@@ -373,7 +450,10 @@ class VordrServer:
         refresh_interval_s: float,
         backend: Any,
         proof_secret: str,
+        response_auth: str,
+        require_sgx_signing_key: bool,
         ssl_context: ssl.SSLContext | None,
+        cvm_update_in_progress: bool = False,
     ) -> None:
         self.listen_host = listen_host
         self.port = port
@@ -381,14 +461,25 @@ class VordrServer:
         self.evidence_mode = evidence_mode
         self.refresh_interval_s = refresh_interval_s
         self.backend = backend
-        self.proof_secret = proof_secret
+        self.proof_signer = ResponseProofSigner(
+            response_auth,
+            controller_id=controller_id,
+            proof_secret=proof_secret,
+            require_sgx_key=require_sgx_signing_key,
+        )
         self.ssl_context = ssl_context
+        self.cvm_update_in_progress = cvm_update_in_progress
         self.state = CachedTDXState()
         self._state_lock = asyncio.Lock()
         self._server: asyncio.base_events.Server | None = None
         self._refresh_task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self.started_at = time.time()
+        self.refresh_active = False
+        self.refresh_started_at = 0.0
+        self.refresh_completed_at = 0.0
+        self.active_connections = 0
+        self.peak_active_connections = 0
         self.stats = {
             "requests": 0,
             "served": 0,
@@ -397,6 +488,8 @@ class VordrServer:
 
     async def _refresh_once(self) -> None:
         refresh_number = self.state.refresh_count + 1
+        self.refresh_active = True
+        self.refresh_started_at = time.time()
         try:
             new_state = await asyncio.to_thread(self.backend.refresh, refresh_number)
         except Exception as exc:
@@ -407,8 +500,13 @@ class VordrServer:
                 verification_time=now,
                 refresh_count=refresh_number,
                 last_refresh_ms=0.0,
+                cvm_update_in_progress=self.cvm_update_in_progress,
                 error=str(exc),
             )
+
+        self.refresh_active = False
+        self.refresh_completed_at = time.time()
+        new_state.cvm_update_in_progress = self.cvm_update_in_progress
 
         async with self._state_lock:
             self.state = new_state
@@ -435,6 +533,7 @@ class VordrServer:
         self.stats["requests"] += 1
         start = time.perf_counter()
         nonce = request.get("nonce", "")
+        refresh_in_progress = self.refresh_active
         if not nonce:
             self.stats["errors"] += 1
             return {"status": "error", "error": "missing nonce"}
@@ -452,6 +551,8 @@ class VordrServer:
             "evidence_mode": self.evidence_mode,
             "nonce_echo": nonce,
             "nonce_hash": nonce_hash,
+            "wen_refresh_in_progress": refresh_in_progress,
+            "cvm_update_in_progress": snapshot.cvm_update_in_progress,
             "tdx_verdict": snapshot.verdict,
             "tdx_mrtd": snapshot.mrtd,
             "tdx_quote_hash": snapshot.quote_hash,
@@ -459,6 +560,7 @@ class VordrServer:
             "tdx_verification_time": snapshot.verification_time,
             "refresh_count": snapshot.refresh_count,
             "raw_quote_sha256": snapshot.raw_quote_sha256,
+            "runtime_evidence_sha256": snapshot.runtime_evidence_sha256,
             "ima_log_sha256": snapshot.ima_log_sha256,
             "pcr10_sha256": snapshot.pcr10_sha256,
             "command_log_sha256": snapshot.command_log_sha256,
@@ -467,16 +569,20 @@ class VordrServer:
             "issued_at": now,
         }
 
+        proof_start = time.perf_counter()
+        proof = self.proof_signer.authenticate(proof_fields)
+        proof_signing_ms = (time.perf_counter() - proof_start) * 1000.0
         response = {
             "status": "success" if snapshot.verified else "error",
             "controller_id": self.controller_id,
             "evidence_mode": self.evidence_mode,
             "nonce_echo": nonce,
             "nonce_hash": nonce_hash,
-            "proof_alg": "hmac-sha256",
-            "proof_mac": compute_proof_mac(self.proof_secret, proof_fields),
+            **proof,
+            "wen_refresh_in_progress": refresh_in_progress,
             "issued_at": now,
             "tdx_verified": snapshot.verified,
+            "cvm_update_in_progress": snapshot.cvm_update_in_progress,
             "tdx_verdict": snapshot.verdict,
             "tdx_attestation_method": snapshot.attestation_method,
             "tdx_mrtd": snapshot.mrtd,
@@ -491,6 +597,8 @@ class VordrServer:
             "staleness_ms": staleness_ms,
             "raw_quote_sha256": snapshot.raw_quote_sha256,
             "raw_quote_size": snapshot.raw_quote_size,
+            "runtime_evidence_sha256": snapshot.runtime_evidence_sha256,
+            "runtime_evidence_size": snapshot.runtime_evidence_size,
             "ima_log_sha256": snapshot.ima_log_sha256,
             "ima_log_size": snapshot.ima_log_size,
             "ima_entry_count": snapshot.ima_entry_count,
@@ -501,12 +609,14 @@ class VordrServer:
             "command_log_format": snapshot.command_log_format,
             "warnings": snapshot.warnings,
             "error": snapshot.error,
+            "proof_signing_ms": proof_signing_ms,
             "server_processing_ms": (time.perf_counter() - start) * 1000.0,
         }
         if self.evidence_mode == "full":
             response.update(
                 {
                     "raw_quote": snapshot.raw_quote,
+                    "runtime_evidence": snapshot.runtime_evidence,
                     "ima_log": snapshot.ima_log,
                     "pcr10": snapshot.pcr10,
                     "command_log": snapshot.command_log,
@@ -525,21 +635,32 @@ class VordrServer:
             "status": "success",
             "controller_id": self.controller_id,
             "evidence_mode": self.evidence_mode,
+            **self.proof_signer.metadata(),
             "requests": self.stats["requests"],
             "served": self.stats["served"],
             "errors": self.stats["errors"],
             "refresh_count": snapshot.refresh_count,
             "last_refresh_ms": snapshot.last_refresh_ms,
+            "refresh_in_progress": self.refresh_active,
+            "refresh_started_at": self.refresh_started_at,
+            "refresh_completed_at": self.refresh_completed_at,
+            "cvm_update_in_progress": snapshot.cvm_update_in_progress,
             "tdx_verification_time": snapshot.verification_time,
             "staleness_ms": max(0.0, (now - snapshot.verification_time) * 1000.0) if snapshot.verification_time else 0.0,
             "tdx_verdict": snapshot.verdict,
             "tdx_quote_hash": snapshot.quote_hash,
             "tdx_runtime_verdict": snapshot.runtime_verdict,
+            "warnings": snapshot.warnings,
+            "error": snapshot.error,
             "raw_quote_size": snapshot.raw_quote_size,
+            "runtime_evidence_size": snapshot.runtime_evidence_size,
+            "runtime_evidence_sha256": snapshot.runtime_evidence_sha256,
             "ima_log_size": snapshot.ima_log_size,
             "ima_entry_count": snapshot.ima_entry_count,
             "command_log_size": snapshot.command_log_size,
             "command_log_entries": snapshot.command_log_entries,
+            "active_connections": self.active_connections,
+            "peak_active_connections": self.peak_active_connections,
             "uptime_s": now - self.started_at,
         }
 
@@ -547,13 +668,22 @@ class VordrServer:
         snapshot = await self._snapshot_state()
         return {
             "status": "success",
-            "ready": snapshot.refresh_count > 0,
+            "ready": snapshot.refresh_count > 0 and snapshot.verified,
             "verified": snapshot.verified,
+            **self.proof_signer.metadata(),
+            "cvm_update_in_progress": snapshot.cvm_update_in_progress,
             "refresh_count": snapshot.refresh_count,
             "verdict": snapshot.verdict,
+            "runtime_verdict": snapshot.runtime_verdict,
+            "warnings": snapshot.warnings,
+            "error": snapshot.error,
         }
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.active_connections += 1
+        self.peak_active_connections = max(
+            self.peak_active_connections, self.active_connections
+        )
         try:
             while not reader.at_eof():
                 request = await recv_json(reader)
@@ -571,6 +701,7 @@ class VordrServer:
         except ConnectionError:
             pass
         finally:
+            self.active_connections -= 1
             writer.close()
             try:
                 await writer.wait_closed()
@@ -581,7 +712,10 @@ class VordrServer:
         print(
             f"[vordr] starting controller={self.controller_id} "
             f"listen={self.listen_host}:{self.port} refresh_interval={self.refresh_interval_s}s "
-            f"evidence_mode={self.evidence_mode}"
+            f"evidence_mode={self.evidence_mode} "
+            f"response_auth={self.proof_signer.mode} "
+            f"key_origin={self.proof_signer.key_origin} "
+            f"key_id={self.proof_signer.key_id or 'session-hmac'}"
         )
         await self._refresh_once()
         self._refresh_task = asyncio.create_task(self._refresh_loop())
@@ -663,6 +797,22 @@ def main() -> None:
         help="Path to a JSONL/JSON command log snapshot to bundle with full evidence",
     )
     parser.add_argument("--proof-secret", default="vordr-benchmark-secret")
+    parser.add_argument(
+        "--response-auth",
+        choices=["hmac-sha256", "ed25519"],
+        default="ed25519",
+        help="Authenticate each delegated result with a session HMAC or Ed25519 signature",
+    )
+    parser.add_argument(
+        "--require-sgx-signing-key",
+        action="store_true",
+        help="Fail unless Ed25519 is derived from Gramine's MRSIGNER sealing key",
+    )
+    parser.add_argument(
+        "--cvm-update-in-progress",
+        action="store_true",
+        help="Expose that the WEN is currently applying an installation/update on the CVM",
+    )
     parser.add_argument("--tls-cert", default=None)
     parser.add_argument("--tls-key", default=None)
     args = parser.parse_args()
@@ -679,23 +829,15 @@ def main() -> None:
     if args.refresh_backend == "sgx-verifier":
         if not args.tdx_host:
             parser.error("--tdx-host is required for --refresh-backend sgx-verifier")
-        if args.evidence_mode == "full":
-            backend = FullEvidenceTDXRefreshBackend(
-                tdx_host=args.tdx_host,
-                tdx_port=args.tdx_port,
-                method=args.tdx_method,
-                verify_cert=not args.no_verify_tdx,
-                ca_cert=args.tdx_ca_cert,
-                command_log_provider=command_log_provider,
-            )
-        else:
-            backend = SGXVerifierRefreshBackend(
-                tdx_host=args.tdx_host,
-                tdx_port=args.tdx_port,
-                method=args.tdx_method,
-                verify_cert=not args.no_verify_tdx,
-                ca_cert=args.tdx_ca_cert,
-            )
+        backend = SGXVerifierRefreshBackend(
+            tdx_host=args.tdx_host,
+            tdx_port=args.tdx_port,
+            method=args.tdx_method,
+            verify_cert=not args.no_verify_tdx,
+            ca_cert=args.tdx_ca_cert,
+            evidence_mode=args.evidence_mode,
+            command_log_provider=command_log_provider,
+        )
     else:
         backend = SyntheticRefreshBackend(
             args.synthetic_refresh_ms,
@@ -714,7 +856,10 @@ def main() -> None:
         refresh_interval_s=args.refresh_interval_s,
         backend=backend,
         proof_secret=args.proof_secret,
+        response_auth=args.response_auth,
+        require_sgx_signing_key=args.require_sgx_signing_key,
         ssl_context=ssl_context,
+        cvm_update_in_progress=args.cvm_update_in_progress,
     )
 
     loop = asyncio.new_event_loop()

@@ -1,0 +1,73 @@
+# Gramine Manifest Template for the Vordr scalability WEN server
+#
+# This enclavizes evaluation/scalability/vordr_server.py so the same
+# single-WEN harness can be measured with the WEN running inside SGX.
+
+libos.entrypoint = "{{ python_path }}"
+
+loader.log_level = "{{ log_level }}"
+loader.insecure__use_cmdline_argv = true
+
+loader.env.LD_LIBRARY_PATH = "/lib:{{ arch_libdir }}:/usr/lib:/usr/{{ arch_libdir }}"
+loader.env.PATH = "/bin:/usr/bin"
+loader.env.HOME = "/home/user"
+loader.env.PYTHONUNBUFFERED = "1"
+loader.env.PYTHONPATH = "/app:/app/evaluation/scalability:/app/research/sgx-tdx-attestation:/app/research/sgx-tdx-attestation/common:/app/research/sgx-tdx-attestation/sgx-verifier"
+
+fs.mounts = [
+    { path = "/lib", uri = "file:{{ gramine.runtimedir() }}" },
+    { path = "{{ arch_libdir }}", uri = "file:{{ arch_libdir }}" },
+    { path = "/usr/{{ arch_libdir }}", uri = "file:/usr/{{ arch_libdir }}" },
+    { path = "/usr/lib", uri = "file:/usr/lib" },
+    { path = "{{ python_path }}", uri = "file:{{ python_path }}" },
+    { path = "/usr/lib/python{{ python_version }}", uri = "file:/usr/lib/python{{ python_version }}" },
+    { path = "/usr/lib/python3/dist-packages", uri = "file:/usr/lib/python3/dist-packages" },
+    { path = "/usr/lib/python3", uri = "file:/usr/lib/python3" },
+    { path = "/etc", uri = "file:/etc" },
+    { path = "/app", uri = "file:{{ repo_root }}" },
+    { type = "tmpfs", path = "/tmp" },
+]
+
+sgx.remote_attestation = "dcap"
+sgx.debug = true
+sgx.enclave_size = "4G"
+sgx.max_threads = 128
+sgx.isvprodid = 1
+sgx.isvsvn = 0
+
+sys.insecure__allow_eventfd = true
+sys.stack.size = "2M"
+sys.enable_sigterm_injection = true
+sys.enable_extra_runtime_domain_names_conf = true
+
+sgx.trusted_files = [
+    "file:{{ python_path }}",
+    "file:{{ gramine.runtimedir() }}/",
+    "file:{{ arch_libdir }}/",
+    "file:/usr/{{ arch_libdir }}/",
+    "file:/usr/lib/python{{ python_version }}/",
+    "file:/usr/lib/python3/dist-packages/",
+    "file:/usr/lib/python3/",
+    "file:{{ repo_root }}/evaluation/scalability/vordr_server.py",
+    "file:{{ repo_root }}/evaluation/scalability/scale_common.py",
+    "file:{{ repo_root }}/research/sgx-tdx-attestation/common/",
+    "file:{{ repo_root }}/research/sgx-tdx-attestation/sgx-verifier/",
+    "file:/etc/ssl/certs/",
+    "file:/usr/share/ca-certificates/",
+]
+
+sgx.allowed_files = [
+    "file:/etc/nsswitch.conf",
+    "file:/etc/host.conf",
+    "file:/etc/resolv.conf",
+    "file:/etc/hosts",
+    "file:/etc/localtime",
+    "file:/etc/passwd",
+    "file:/etc/group",
+    "file:/etc/gai.conf",
+    "file:{{ repo_root }}/research/sgx-tdx-attestation/certs/",
+    # SGX-sealed protocol 1.2 checkpoints. The ciphertext is written by the
+    # enclave and authenticated with an MRSIGNER-derived sealing key.
+    "file:{{ repo_root }}/research/sgx-tdx-attestation/runtime-state/",
+    "file:{{ repo_root }}/evaluation/results/",
+]
