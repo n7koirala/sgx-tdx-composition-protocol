@@ -1409,6 +1409,15 @@ def main() -> None:
     parser.add_argument("--duration-s", type=float, default=10.0)
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument(
+        "--inter-point-cooldown-s",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds to wait between measured points so client-side TCP "
+            "TIME_WAIT tuples can expire (default: 0)"
+        ),
+    )
+    parser.add_argument(
         "--workload-model",
         choices=["closed-loop", "one-shot", "open-loop"],
         default="closed-loop",
@@ -1571,6 +1580,8 @@ def main() -> None:
         parser.error("--server-min-nofile must be positive")
     if args.repetitions <= 0:
         parser.error("--repetitions must be positive")
+    if args.inter_point_cooldown_s < 0:
+        parser.error("--inter-point-cooldown-s must be non-negative")
     if args.connections <= 0:
         parser.error("--connections must be positive")
     if args.client_warmup_requests < 0:
@@ -1619,7 +1630,7 @@ def main() -> None:
         for users, offered_rate in points
         for repeat in range(1, args.repetitions + 1)
     ]
-    for users, offered_rate, repeat in repeated_points:
+    for point_index, (users, offered_rate, repeat) in enumerate(repeated_points):
         point_text = f"rate={offered_rate:g} rps" if offered_rate else f"users={users}"
         print(f"\n[vordr] {point_text}, repeat={repeat}/{args.repetitions}")
         summary, raw = asyncio.run(
@@ -1658,6 +1669,16 @@ def main() -> None:
             f"p99={summary['p99_ms']:.2f}ms "
             f"run-amp={summary['amplification_run_refreshes']:.1f}x"
         )
+        if (
+            args.inter_point_cooldown_s > 0
+            and point_index + 1 < len(repeated_points)
+        ):
+            print(
+                "  "
+                f"cooldown={args.inter_point_cooldown_s:g}s "
+                "before the next point"
+            )
+            time.sleep(args.inter_point_cooldown_s)
 
     write_csv(out_dir / "vordr_single_wen_summary.csv", summaries)
 
