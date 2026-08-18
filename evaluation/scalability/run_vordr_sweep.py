@@ -106,6 +106,36 @@ def collect_reproducibility_metadata(args: argparse.Namespace) -> dict[str, Any]
         sigstruct_raw = command_output(
             ["gramine-sgx-sigstruct-view", str(SCALABILITY_DIR / "vordr_wen.sig")]
         )
+    local_sgx_identity = parse_colon_metadata(sigstruct_raw)
+    remote_sgx_identity = {
+        key: value
+        for key, value in {
+            "mr_enclave": args.wen_mrenclave,
+            "mr_signer": args.wen_mrsigner,
+        }.items()
+        if value
+    }
+    if args.no_spawn_server:
+        sgx_identity = remote_sgx_identity
+        sgx_identity_source = (
+            "operator-recorded-remote" if remote_sgx_identity else "unavailable"
+        )
+        gramine_version = args.wen_gramine_version
+        sigstruct_sha256 = ""
+        sgx_mode = args.wen_sgx_mode
+    else:
+        sgx_identity = local_sgx_identity
+        sgx_identity_source = "local-sigstruct" if local_sgx_identity else "unavailable"
+        gramine_version = command_output(["gramine-sgx", "--version"])
+        sigstruct_sha256 = file_sha256(SCALABILITY_DIR / "vordr_wen.sig")
+        sgx_mode = (
+            "debug"
+            if args.server_runtime == "gramine-sgx"
+            and "sgx.debug = true" in (
+                SCALABILITY_DIR / "vordr_wen.manifest.template"
+            ).read_text(encoding="utf-8")
+            else "unknown"
+        )
     safe_args = {
         key: value
         for key, value in vars(args).items()
@@ -138,19 +168,16 @@ def collect_reproducibility_metadata(args: argparse.Namespace) -> dict[str, Any]
             "host": args.host,
             "port": args.port,
             "listen_backlog_requested": args.listen_backlog,
+            "min_nofile_requested": args.server_min_nofile,
             "runtime": args.server_runtime,
-            "gramine_version": command_output(["gramine-sgx", "--version"]),
-            "sigstruct_sha256": file_sha256(SCALABILITY_DIR / "vordr_wen.sig"),
-            "sgx_identity": parse_colon_metadata(sigstruct_raw),
+            "gramine_version": gramine_version,
+            "sigstruct_sha256": sigstruct_sha256,
+            "sgx_identity": sgx_identity,
+            "sgx_identity_source": sgx_identity_source,
             "hardware_description": args.wen_hardware,
             "python_version": platform.python_version(),
             "cryptography_version": command_output([sys.executable, "-c", "import cryptography; print(cryptography.__version__)"]),
-            "sgx_debug_manifest": (
-                args.server_runtime == "gramine-sgx"
-                and "sgx.debug = true" in (SCALABILITY_DIR / "vordr_wen.manifest.template").read_text(
-                    encoding="utf-8"
-                )
-            ),
+            "sgx_mode": sgx_mode,
         },
         "cvm": {
             "location": args.cvm_location,
@@ -600,7 +627,7 @@ async def one_shot_user(
         try:
             reader, writer, connect_ms = await connect()
         except Exception as exc:
-            connect_error = str(exc)
+            connect_error = f"{type(exc).__name__}: {exc}"
 
     await ready_queue.put(user_id)
     await start_event.wait()
@@ -610,7 +637,7 @@ async def one_shot_user(
         try:
             reader, writer, connect_ms = await connect()
         except Exception as exc:
-            connect_error = str(exc)
+            connect_error = f"{type(exc).__name__}: {exc}"
 
     result: dict[str, Any] = {
         "user_id": user_id,
@@ -739,7 +766,7 @@ async def open_loop_worker(
             (time.perf_counter() - connect_started) * 1000.0
         )
     except Exception as exc:
-        connect_error = str(exc)
+        connect_error = f"{type(exc).__name__}: {exc}"
         result["errors"].append(f"worker {worker_id}: {exc}")
 
     await ready_queue.put(worker_id)
@@ -1008,6 +1035,8 @@ def summarize_run(
         "server_runtime": server_runtime,
         "peak_active_connections": end_stats.get("peak_active_connections", 0),
         "listen_backlog": end_stats.get("listen_backlog", 0),
+        "nofile_soft_limit": end_stats.get("nofile_soft_limit", 0),
+        "nofile_hard_limit": end_stats.get("nofile_hard_limit", 0),
         "active_connections_end": max(0, int(end_stats.get("active_connections", 0)) - 1),
         "verify_proof": verify_proof,
         "attempted": attempted,
@@ -1075,6 +1104,8 @@ def build_server_cmd(args: argparse.Namespace, port: int) -> list[str]:
             str(port),
             "--listen-backlog",
             str(args.listen_backlog),
+            "--min-nofile",
+            str(args.server_min_nofile),
             "--controller-id",
             args.controller_id,
             "--evidence-mode",
@@ -1230,6 +1261,13 @@ async def run_one_point(
                 f"expected={args.listen_backlog}, reported={actual_backlog}. "
                 "Restart the WEN with the matching --listen-backlog value."
             )
+        actual_nofile = int(identity_stats.get("nofile_soft_limit", 0))
+        if actual_nofile < args.server_min_nofile:
+            raise RuntimeError(
+                "WEN RLIMIT_NOFILE mismatch: "
+                f"required>={args.server_min_nofile}, reported={actual_nofile}. "
+                "Restart the WEN with the matching --min-nofile value."
+            )
         preflight_rtts = await measure_control_rtt(args.host, active_port, ssl_ctx)
         proof_public_key, proof_key_id = validate_server_proof_identity(
             identity_stats,
@@ -1246,6 +1284,7 @@ async def run_one_point(
             verify_proof=not args.no_verify_proof,
             evidence_mode=args.evidence_mode,
         )
+        await query_server(args.host, active_port, ssl_ctx, "reset_peak")
         start_stats = await query_server(args.host, active_port, ssl_ctx, "stats")
         open_loop_details: dict[str, Any] = {}
         if args.workload_model == "open-loop":
@@ -1416,6 +1455,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9443)
     parser.add_argument("--listen-backlog", type=int, default=4096)
+    parser.add_argument("--server-min-nofile", type=int, default=65536)
     parser.add_argument("--controller-id", default="wen-1")
     parser.add_argument("--transport", choices=["tcp", "tls"], default="tcp")
     parser.add_argument(
@@ -1472,6 +1512,14 @@ def main() -> None:
     parser.add_argument("--wen-cvm-rtt-method", default="")
     parser.add_argument("--wen-location", default="")
     parser.add_argument("--wen-hardware", default="")
+    parser.add_argument("--wen-mrenclave", default="")
+    parser.add_argument("--wen-mrsigner", default="")
+    parser.add_argument("--wen-gramine-version", default="")
+    parser.add_argument(
+        "--wen-sgx-mode",
+        choices=["unknown", "debug", "production"],
+        default="unknown",
+    )
     parser.add_argument("--cvm-hardware", default="")
     parser.add_argument("--cvm-location", default="")
     parser.add_argument("--cvm-image", default="")
@@ -1519,6 +1567,8 @@ def main() -> None:
         parser.error("--duration-s must be positive")
     if args.listen_backlog <= 0:
         parser.error("--listen-backlog must be positive")
+    if args.server_min_nofile <= 0:
+        parser.error("--server-min-nofile must be positive")
     if args.repetitions <= 0:
         parser.error("--repetitions must be positive")
     if args.connections <= 0:
@@ -1552,6 +1602,7 @@ def main() -> None:
     print(f"Transport:   {args.transport}")
     print(f"Runtime:     {args.server_runtime}")
     print(f"Backlog:     {args.listen_backlog}")
+    print(f"Min nofile:  {args.server_min_nofile}")
     print(f"Proof:       {args.response_auth}")
     print(f"Backend:     {args.refresh_backend}")
     print(f"Evidence:    {args.evidence_mode}")

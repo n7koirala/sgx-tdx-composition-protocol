@@ -8,6 +8,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import resource
 import socket
 import ssl
 import sys
@@ -28,6 +29,18 @@ from scale_common import ResponseProofSigner, generate_nonce, recv_json, send_js
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SGX_TDX_ROOT = REPO_ROOT / "research" / "sgx-tdx-attestation"
 STREAM_LIMIT_BYTES = 16 * 1024 * 1024
+
+
+def ensure_nofile_soft_limit(minimum: int) -> tuple[int, int]:
+    """Raise RLIMIT_NOFILE without lowering an already larger limit."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard < minimum:
+        raise RuntimeError(
+            f"RLIMIT_NOFILE hard limit {hard} is below required minimum {minimum}"
+        )
+    if soft < minimum:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (minimum, hard))
+    return resource.getrlimit(resource.RLIMIT_NOFILE)
 
 
 @dataclass
@@ -446,6 +459,8 @@ class VordrServer:
         listen_host: str,
         port: int,
         listen_backlog: int,
+        nofile_soft_limit: int,
+        nofile_hard_limit: int,
         controller_id: str,
         evidence_mode: str,
         refresh_interval_s: float,
@@ -459,6 +474,8 @@ class VordrServer:
         self.listen_host = listen_host
         self.port = port
         self.listen_backlog = listen_backlog
+        self.nofile_soft_limit = nofile_soft_limit
+        self.nofile_hard_limit = nofile_hard_limit
         self.controller_id = controller_id
         self.evidence_mode = evidence_mode
         self.refresh_interval_s = refresh_interval_s
@@ -664,6 +681,8 @@ class VordrServer:
             "active_connections": self.active_connections,
             "peak_active_connections": self.peak_active_connections,
             "listen_backlog": self.listen_backlog,
+            "nofile_soft_limit": self.nofile_soft_limit,
+            "nofile_hard_limit": self.nofile_hard_limit,
             "uptime_s": now - self.started_at,
         }
 
@@ -697,6 +716,9 @@ class VordrServer:
                     response = await self._handle_stats()
                 elif action == "health":
                     response = await self._handle_health()
+                elif action == "reset_peak":
+                    self.peak_active_connections = self.active_connections
+                    response = await self._handle_stats()
                 else:
                     self.stats["errors"] += 1
                     response = {"status": "error", "error": f"unknown action: {action}"}
@@ -715,6 +737,7 @@ class VordrServer:
         print(
             f"[vordr] starting controller={self.controller_id} "
             f"listen={self.listen_host}:{self.port} backlog={self.listen_backlog} "
+            f"nofile={self.nofile_soft_limit}/{self.nofile_hard_limit} "
             f"refresh_interval={self.refresh_interval_s}s "
             f"evidence_mode={self.evidence_mode} "
             f"response_auth={self.proof_signer.mode} "
@@ -770,6 +793,12 @@ def main() -> None:
         type=int,
         default=4096,
         help="Pending TCP connection queue requested from the kernel (default: 4096)",
+    )
+    parser.add_argument(
+        "--min-nofile",
+        type=int,
+        default=65536,
+        help="Minimum soft RLIMIT_NOFILE required by the WEN (default: 65536)",
     )
     parser.add_argument("--controller-id", default="wen-1")
     parser.add_argument(
@@ -830,6 +859,9 @@ def main() -> None:
 
     if args.listen_backlog <= 0:
         parser.error("--listen-backlog must be positive")
+    if args.min_nofile <= 0:
+        parser.error("--min-nofile must be positive")
+    nofile_soft, nofile_hard = ensure_nofile_soft_limit(args.min_nofile)
 
     if args.evidence_mode == "full" and not args.command_log_file:
         parser.error("--command-log-file is required for --evidence-mode full")
@@ -866,6 +898,8 @@ def main() -> None:
         listen_host=args.listen_host,
         port=args.port,
         listen_backlog=args.listen_backlog,
+        nofile_soft_limit=nofile_soft,
+        nofile_hard_limit=nofile_hard,
         controller_id=args.controller_id,
         evidence_mode=args.evidence_mode,
         refresh_interval_s=args.refresh_interval_s,
