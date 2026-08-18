@@ -286,11 +286,16 @@ verifies the complete protocol-1.2 evidence, and serves only compact,
 nonce-bound SGX-signed results to clients:
 
 ```bash
+# Keep the accept queue and process descriptor limit above the largest burst.
+ulimit -n 65536
+sudo sysctl -w net.core.somaxconn=16384
+
 cd ~/sgx-tdx-composition-protocol/evaluation/scalability
 export CVM_IP=136.111.107.168
 make clean all
 make run-sgx ARGS="--listen-host 0.0.0.0 \
   --port 10443 \
+  --listen-backlog 16384 \
   --evidence-mode light \
   --tls-cert /app/research/sgx-tdx-attestation/certs/scalability/wen-server.crt \
   --tls-key /app/research/sgx-tdx-attestation/certs/scalability/wen-server.key \
@@ -354,6 +359,7 @@ python3 run_vordr_sweep.py \
   --no-spawn-server \
   --host "$WEN_HOST" \
   --port 10443 \
+  --listen-backlog 16384 \
   --transport tls \
   --client-ca-cert <WEN_CA_CERT> \
   --server-runtime gramine-sgx \
@@ -387,6 +393,7 @@ python3 run_vordr_sweep.py \
   --no-spawn-server \
   --host "$WEN_HOST" \
   --port 10443 \
+  --listen-backlog 16384 \
   --transport tls \
   --client-ca-cert <WEN_CA_CERT> \
   --server-runtime gramine-sgx \
@@ -410,6 +417,7 @@ python3 run_vordr_sweep.py \
   --no-spawn-server \
   --host "$WEN_HOST" \
   --port 10443 \
+  --listen-backlog 16384 \
   --transport tls \
   --client-ca-cert <WEN_CA_CERT> \
   --server-runtime gramine-sgx \
@@ -436,6 +444,7 @@ python3 run_vordr_sweep.py \
   --no-spawn-server \
   --host "$WEN_HOST" \
   --port 10443 \
+  --listen-backlog 16384 \
   --transport tls \
   --client-ca-cert <WEN_CA_CERT> \
   --server-runtime gramine-sgx \

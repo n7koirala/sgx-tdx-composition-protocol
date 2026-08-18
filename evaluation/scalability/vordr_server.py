@@ -445,6 +445,7 @@ class VordrServer:
         self,
         listen_host: str,
         port: int,
+        listen_backlog: int,
         controller_id: str,
         evidence_mode: str,
         refresh_interval_s: float,
@@ -457,6 +458,7 @@ class VordrServer:
     ) -> None:
         self.listen_host = listen_host
         self.port = port
+        self.listen_backlog = listen_backlog
         self.controller_id = controller_id
         self.evidence_mode = evidence_mode
         self.refresh_interval_s = refresh_interval_s
@@ -661,6 +663,7 @@ class VordrServer:
             "command_log_entries": snapshot.command_log_entries,
             "active_connections": self.active_connections,
             "peak_active_connections": self.peak_active_connections,
+            "listen_backlog": self.listen_backlog,
             "uptime_s": now - self.started_at,
         }
 
@@ -711,7 +714,8 @@ class VordrServer:
     async def serve(self) -> None:
         print(
             f"[vordr] starting controller={self.controller_id} "
-            f"listen={self.listen_host}:{self.port} refresh_interval={self.refresh_interval_s}s "
+            f"listen={self.listen_host}:{self.port} backlog={self.listen_backlog} "
+            f"refresh_interval={self.refresh_interval_s}s "
             f"evidence_mode={self.evidence_mode} "
             f"response_auth={self.proof_signer.mode} "
             f"key_origin={self.proof_signer.key_origin} "
@@ -725,6 +729,7 @@ class VordrServer:
             self.port,
             ssl=self.ssl_context,
             reuse_address=True,
+            backlog=self.listen_backlog,
             limit=STREAM_LIMIT_BYTES,
         )
         sockets = self._server.sockets or []
@@ -760,6 +765,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Single-WEN Vordr benchmark service")
     parser.add_argument("--listen-host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=9443)
+    parser.add_argument(
+        "--listen-backlog",
+        type=int,
+        default=4096,
+        help="Pending TCP connection queue requested from the kernel (default: 4096)",
+    )
     parser.add_argument("--controller-id", default="wen-1")
     parser.add_argument(
         "--evidence-mode",
@@ -817,6 +828,9 @@ def main() -> None:
     parser.add_argument("--tls-key", default=None)
     args = parser.parse_args()
 
+    if args.listen_backlog <= 0:
+        parser.error("--listen-backlog must be positive")
+
     if args.evidence_mode == "full" and not args.command_log_file:
         parser.error("--command-log-file is required for --evidence-mode full")
 
@@ -851,6 +865,7 @@ def main() -> None:
     server = VordrServer(
         listen_host=args.listen_host,
         port=args.port,
+        listen_backlog=args.listen_backlog,
         controller_id=args.controller_id,
         evidence_mode=args.evidence_mode,
         refresh_interval_s=args.refresh_interval_s,

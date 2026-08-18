@@ -137,6 +137,7 @@ def collect_reproducibility_metadata(args: argparse.Namespace) -> dict[str, Any]
             "location": args.wen_location,
             "host": args.host,
             "port": args.port,
+            "listen_backlog_requested": args.listen_backlog,
             "runtime": args.server_runtime,
             "gramine_version": command_output(["gramine-sgx", "--version"]),
             "sigstruct_sha256": file_sha256(SCALABILITY_DIR / "vordr_wen.sig"),
@@ -1006,6 +1007,7 @@ def summarize_run(
         "transport": transport,
         "server_runtime": server_runtime,
         "peak_active_connections": end_stats.get("peak_active_connections", 0),
+        "listen_backlog": end_stats.get("listen_backlog", 0),
         "active_connections_end": max(0, int(end_stats.get("active_connections", 0)) - 1),
         "verify_proof": verify_proof,
         "attempted": attempted,
@@ -1071,6 +1073,8 @@ def build_server_cmd(args: argparse.Namespace, port: int) -> list[str]:
             args.host,
             "--port",
             str(port),
+            "--listen-backlog",
+            str(args.listen_backlog),
             "--controller-id",
             args.controller_id,
             "--evidence-mode",
@@ -1219,6 +1223,13 @@ async def run_one_point(
 
     try:
         identity_stats = await query_server(args.host, active_port, ssl_ctx, "stats")
+        actual_backlog = int(identity_stats.get("listen_backlog", 0))
+        if actual_backlog != args.listen_backlog:
+            raise RuntimeError(
+                "WEN listen backlog mismatch: "
+                f"expected={args.listen_backlog}, reported={actual_backlog}. "
+                "Restart the WEN with the matching --listen-backlog value."
+            )
         preflight_rtts = await measure_control_rtt(args.host, active_port, ssl_ctx)
         proof_public_key, proof_key_id = validate_server_proof_identity(
             identity_stats,
@@ -1404,6 +1415,7 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9443)
+    parser.add_argument("--listen-backlog", type=int, default=4096)
     parser.add_argument("--controller-id", default="wen-1")
     parser.add_argument("--transport", choices=["tcp", "tls"], default="tcp")
     parser.add_argument(
@@ -1505,6 +1517,8 @@ def main() -> None:
 
     if args.duration_s <= 0:
         parser.error("--duration-s must be positive")
+    if args.listen_backlog <= 0:
+        parser.error("--listen-backlog must be positive")
     if args.repetitions <= 0:
         parser.error("--repetitions must be positive")
     if args.connections <= 0:
@@ -1537,6 +1551,7 @@ def main() -> None:
     print(f"Repetitions: {args.repetitions}")
     print(f"Transport:   {args.transport}")
     print(f"Runtime:     {args.server_runtime}")
+    print(f"Backlog:     {args.listen_backlog}")
     print(f"Proof:       {args.response_auth}")
     print(f"Backend:     {args.refresh_backend}")
     print(f"Evidence:    {args.evidence_mode}")
