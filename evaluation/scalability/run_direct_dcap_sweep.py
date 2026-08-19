@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from common import ensure_dir, parse_int_list, percentile, summarize_samples, write_csv
+from scale_common import ensure_dir, parse_int_list, summarize_samples, write_csv
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -158,4 +158,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

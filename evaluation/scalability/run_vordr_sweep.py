@@ -38,7 +38,16 @@ SCALABILITY_DIR = REPO_ROOT / "evaluation" / "scalability"
 SERVER_SCRIPT = REPO_ROOT / "evaluation" / "scalability" / "vordr_server.py"
 GRAMINE_APP = "./vordr_wen"
 GRAMINE_ENTRYPOINT = "/app/evaluation/scalability/vordr_server.py"
-STREAM_LIMIT_BYTES = 16 * 1024 * 1024
+STREAM_LIMIT_BYTES = 256 * 1024 * 1024
+
+AUDIT_EVIDENCE_MODES = frozenset({"ima-audit", "full-audit", "full"})
+RAW_QUOTE_EVIDENCE_MODES = frozenset({"full-audit", "full"})
+
+
+def is_audit_evidence_mode(mode: str) -> bool:
+    return mode in AUDIT_EVIDENCE_MODES
+
+
 GRAMINE_RUNTIMES = {"gramine-direct", "gramine-sgx"}
 
 
@@ -308,23 +317,35 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def verify_full_evidence_response(response: dict[str, Any]) -> dict[str, float]:
-    """Validate the exact protocol-1.2 evidence bundle signed by the WEN."""
+def verify_audit_evidence_response(
+    response: dict[str, Any], evidence_mode: str
+) -> dict[str, float]:
+    """Validate a protocol-1.2 Mode 2 or Mode 3 audit response."""
     raw_quote_b64 = response.get("raw_quote", "")
     runtime_evidence = response.get("runtime_evidence")
-    command_log_b64 = response.get("command_log", "")
+    command_log_b64 = response.get("command_log")
 
-    if not raw_quote_b64:
-        raise ValueError("missing raw_quote")
+    if evidence_mode not in AUDIT_EVIDENCE_MODES:
+        raise ValueError(f"not an audit evidence mode: {evidence_mode}")
+    if evidence_mode in RAW_QUOTE_EVIDENCE_MODES and not raw_quote_b64:
+        raise ValueError("full-audit response is missing raw_quote")
+    if evidence_mode == "ima-audit" and "raw_quote" in response:
+        raise ValueError("IMA-audit response leaked the raw TDX quote")
     if not isinstance(runtime_evidence, dict) or not runtime_evidence:
         raise ValueError("missing runtime_evidence")
     if runtime_evidence.get("version") != "ima-rtmr3-vtpm-v2":
         raise ValueError("runtime_evidence is not protocol 1.2")
-    if not command_log_b64:
+    if int(runtime_evidence.get("ima_start_index", -1)) != 0:
+        raise ValueError("audit response is not a complete start-at-zero IMA snapshot")
+    if command_log_b64 is None:
         raise ValueError("missing command_log")
 
     try:
-        raw_quote = base64.b64decode(raw_quote_b64, validate=True)
+        raw_quote = (
+            base64.b64decode(raw_quote_b64, validate=True)
+            if raw_quote_b64
+            else b""
+        )
         runtime_evidence_bytes = json.dumps(
             runtime_evidence,
             sort_keys=True,
@@ -340,17 +361,16 @@ def verify_full_evidence_response(response: dict[str, Any]) -> dict[str, float]:
         )
         command_log = base64.b64decode(command_log_b64, validate=True)
     except (ValueError, TypeError, binascii.Error) as exc:
-        raise ValueError(f"malformed full-evidence encoding: {exc}") from exc
+        raise ValueError(f"malformed audit-evidence encoding: {exc}") from exc
 
     if not ima_binary or not ima_ascii:
-        raise ValueError("runtime_evidence is missing its binary or ASCII IMA delta")
+        raise ValueError("runtime_evidence is missing its binary or ASCII IMA snapshot")
 
-    raw_quote_sha256 = sha256_hex(raw_quote)
     runtime_evidence_sha256 = sha256_hex(runtime_evidence_bytes)
     ima_log_sha256 = sha256_hex(ima_binary + ima_ascii)
     command_log_sha256 = sha256_hex(command_log)
 
-    if response.get("raw_quote_sha256") != raw_quote_sha256:
+    if raw_quote and response.get("raw_quote_sha256") != sha256_hex(raw_quote):
         raise ValueError("raw_quote_sha256 mismatch")
     if response.get("runtime_evidence_sha256") != runtime_evidence_sha256:
         raise ValueError("runtime_evidence_sha256 mismatch")
@@ -358,6 +378,18 @@ def verify_full_evidence_response(response: dict[str, Any]) -> dict[str, float]:
         raise ValueError("ima_log_sha256 mismatch")
     if response.get("command_log_sha256") != command_log_sha256:
         raise ValueError("command_log_sha256 mismatch")
+    if int(response.get("runtime_evidence_size", -1)) != len(runtime_evidence_bytes):
+        raise ValueError("runtime_evidence_size mismatch")
+    if int(response.get("ima_log_size", -1)) != len(ima_binary) + len(ima_ascii):
+        raise ValueError("ima_log_size mismatch")
+    if int(response.get("command_log_size", -1)) != len(command_log):
+        raise ValueError("command_log_size mismatch")
+    if int(response.get("ima_entry_count", -1)) != int(
+        runtime_evidence.get("ima_entry_count", -2)
+    ):
+        raise ValueError("IMA entry count mismatch")
+    if raw_quote and int(response.get("raw_quote_size", -1)) != len(raw_quote):
+        raise ValueError("raw_quote_size mismatch")
 
     return {
         "response_payload_bytes": response_wire_bytes(response),
@@ -536,8 +568,8 @@ async def one_user(
                     )
                     proof_verify_times.append((time.perf_counter() - proof_started) * 1000.0)
                 response_payload_bytes.append(response_wire_bytes(response))
-                if evidence_mode == "full":
-                    evidence_sizes = verify_full_evidence_response(response)
+                if is_audit_evidence_mode(evidence_mode):
+                    evidence_sizes = verify_audit_evidence_response(response, evidence_mode)
                     raw_quote_bytes.append(evidence_sizes["raw_quote_bytes"])
                     runtime_evidence_bytes.append(
                         evidence_sizes["runtime_evidence_bytes"]
@@ -698,8 +730,8 @@ async def one_shot_user(
         )
         result["response_payload_bytes"].append(response_wire_bytes(response))
 
-        if evidence_mode == "full":
-            evidence_sizes = verify_full_evidence_response(response)
+        if is_audit_evidence_mode(evidence_mode):
+            evidence_sizes = verify_audit_evidence_response(response, evidence_mode)
             for result_key, size_key in (
                 ("raw_quote_bytes", "raw_quote_bytes"),
                 ("runtime_evidence_bytes", "runtime_evidence_bytes"),
@@ -812,8 +844,8 @@ async def open_loop_worker(
                     response_wire_bytes(response)
                 )
 
-                if evidence_mode == "full":
-                    evidence_sizes = verify_full_evidence_response(response)
+                if is_audit_evidence_mode(evidence_mode):
+                    evidence_sizes = verify_audit_evidence_response(response, evidence_mode)
                     for result_key, size_key in (
                         ("raw_quote_bytes", "raw_quote_bytes"),
                         ("runtime_evidence_bytes", "runtime_evidence_bytes"),
@@ -1149,9 +1181,9 @@ def build_server_cmd(args: argparse.Namespace, port: int) -> list[str]:
 
 
 def map_server_path(path_value: str | None, server_runtime: str) -> str | None:
-    if not path_value or server_runtime == "python":
+    if not path_value:
         return path_value
-    if path_value.startswith("/app/"):
+    if server_runtime != "python" and path_value.startswith("/app/"):
         return path_value
     path = Path(path_value).expanduser()
     if not path.is_absolute():
@@ -1160,6 +1192,8 @@ def map_server_path(path_value: str | None, server_runtime: str) -> str | None:
         path = (Path.cwd() / path).resolve(strict=False)
     else:
         path = path.resolve(strict=False)
+    if server_runtime == "python":
+        return str(path)
     try:
         relative = path.relative_to(REPO_ROOT)
     except ValueError as exc:
@@ -1451,9 +1485,12 @@ def main() -> None:
     parser.add_argument("--open-loop-drain-s", type=float, default=30.0)
     parser.add_argument(
         "--evidence-mode",
-        choices=["light", "full"],
+        choices=["light", "ima-audit", "full-audit", "full"],
         default="light",
-        help="Return either lightweight cached verdicts or the full evidence bundle",
+        help=(
+            "light=delegated summary, ima-audit=Mode 2 without raw TDX quote, "
+            "full-audit=Mode 3 including raw TDX quote; full is the legacy schema"
+        ),
     )
     parser.add_argument(
         "--requests-per-user",
@@ -1566,11 +1603,11 @@ def main() -> None:
     if args.no_spawn_server and args.host == "0.0.0.0":
         parser.error("--host must name the remote WEN when --no-spawn-server is used")
     if (
-        args.evidence_mode == "full"
+        is_audit_evidence_mode(args.evidence_mode)
         and not args.no_spawn_server
         and not args.command_log_file
     ):
-        parser.error("--command-log-file is required with --evidence-mode full")
+        parser.error("--command-log-file is required with audit evidence modes")
 
     if args.duration_s <= 0:
         parser.error("--duration-s must be positive")

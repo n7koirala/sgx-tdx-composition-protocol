@@ -94,24 +94,52 @@ cd evaluation/scalability
 python3 generate_ima_workload.py --count 500 --keep-files
 ```
 
-Single-WEN run with the full protocol-1.2 audit bundle: the raw TDX quote,
-the exact composed `ima-rtmr3-vtpm-v2` evidence accepted by WEN (including
-the nonce-bound vTPM quote, AK/RTMR3 binding data, and IMA delta), and the
-SGX-authenticated ASP command log:
+Protocol 1.2 exposes two explicit audit formats. `ima-audit` (Mode 2) returns
+the WEN-authenticated vTPM/IMA/RTMR evidence and command log but deliberately
+omits the raw TDX quote. `full-audit` (Mode 3) adds that quote for independent
+DCAP verification. Both formats use a start-at-zero audit snapshot accumulated
+inside the WEN from already verified deltas; recurring CVM-to-WEN verification
+remains incremental. `full` is retained only as a legacy Mode-3 wire alias.
+
+Run Mode 2 or Mode 3 by changing only `--evidence-mode`:
 
 ```bash
 cd evaluation/scalability
 python3 run_vordr_sweep.py \
-  --users 16,64,256,512,1024 \
-  --duration-s 10 \
-  --evidence-mode full \
-  --server-runtime python \
+  --users 1,2,4,8,16 \
+  --duration-s 60 \
+  --repetitions 5 \
+  --evidence-mode ima-audit \
+  --server-runtime gramine-sgx \
   --refresh-backend sgx-verifier \
   --tdx-host <TDX_IP> \
   --tdx-port 8443 \
   --command-log-file ../results/scalability/full-evidence-inputs/audit_log.jsonl \
-  --no-verify-tdx
+  --out-dir ../results/scalability/audit-mode2-N10000
+
+# Repeat with:
+#   --evidence-mode full-audit
+#   --out-dir ../results/scalability/audit-mode3-N10000
 ```
+
+The audit client fails a point if the evidence is not protocol 1.2, if the
+snapshot does not begin at entry zero, if any signed size/hash is inconsistent,
+if Mode 2 leaks a raw TDX quote, or if Mode 3 omits it. The stream limit is
+256 MiB so 50K/100K-entry snapshots can be measured; calibrate concurrency at
+the largest snapshot before running the full matrix.
+
+After measuring both modes at each IMA history size, validate the runs and
+generate the appendix table and discussion with:
+
+```bash
+python3 summarize_audit_modes.py \
+  --input ima-audit:10000:../results/scalability/audit-mode2-N10000/vordr_single_wen_summary.csv \
+  --input full-audit:10000:../results/scalability/audit-mode3-N10000/vordr_single_wen_summary.csv \
+  --out-dir ../results/scalability/audit-mode-summary
+```
+
+Repeat `--input` for 50K and 100K runs. The summarizer rejects failed,
+untrusted, runtime-unclean, privacy-violating, or malformed rows.
 
 Plotting:
 
@@ -126,7 +154,13 @@ python3 plot_scalability.py \
 
 The direct baseline should be reported as a fresh-quote system: each request forces quote generation. The Vordr benchmark should be reported as a cached-attestation system: the WEN amortizes one background TDX attestation over many end-user responses. The key comparison metric is therefore not just throughput, but also `amplification = successful_end_user_attestations / TDX_refreshes`.
 
-For `--evidence-mode full`, the CSV also reports response payload sizes and the snapshot sizes of the raw quote, IMA log, and command log. That mode answers a different question from the lightweight mode: not just whether one WEN can serve many users, but whether it can serve many users while returning the full attestation evidence set that an end user would need to verify the CVM state independently.
+For either audit mode, the CSV reports serialized response size and component
+sizes for the runtime evidence, raw IMA representations, command log, and (for
+Mode 3) the raw TDX quote. These runs measure serving an evidence snapshot that
+the WEN has already verified during its background refresh. They do not generate
+a new TDX or vTPM quote per end-user request. Results indexed by total IMA size
+`N` are distinct from incremental WEN refresh cost, which is indexed by the
+new-entry count `delta n`.
 
 ## Measuring the WEN Inside SGX
 
@@ -157,7 +191,7 @@ python3 run_vordr_sweep.py \
   --no-verify-tdx
 ```
 
-Audit-Ready RA sweep with the WEN inside SGX:
+Audit-mode sweep with the WEN inside SGX:
 
 ```bash
 cd evaluation/scalability
@@ -167,15 +201,18 @@ python3 generate_command_logs.py \
   --out-dir ../results/scalability/full-evidence-inputs-sgx
 
 python3 run_vordr_sweep.py \
-  --users 1,4,16,64,256 \
-  --duration-s 10 \
-  --evidence-mode full \
+  --users 1,2,4,8,16 \
+  --duration-s 60 \
+  --repetitions 5 \
+  --evidence-mode ima-audit \
   --server-runtime gramine-sgx \
   --refresh-backend sgx-verifier \
   --tdx-host <TDX_IP> \
   --tdx-port 8443 \
   --command-log-file ../results/scalability/full-evidence-inputs-sgx/audit_log.jsonl \
-  --no-verify-tdx
+  --out-dir ../results/scalability/ima-audit-N10000
+
+# Restart the WEN and repeat with --evidence-mode full-audit.
 ```
 
 You can also launch the enclave-resident WEN manually for debugging:
@@ -494,10 +531,13 @@ connections, refresh count, and responses served per composed CVM refresh.
 The client performs verified warm-up responses before resetting measurement
 counters so cryptography/module initialization is outside the timed interval.
 
-In `--evidence-mode full`, the WEN does not reconstruct a legacy bare-PCR
-artifact. It forwards the exact protocol-1.2 `runtime_evidence` object that
-its SGX verifier accepted. The canonical SHA-256 digest of that object is
-covered by each nonce-bound WEN Ed25519 signature. The load generator verifies
-that signature and checks the transmitted TDX quote, runtime evidence,
-binary/ASCII IMA representations, and command log against the digests covered
-by the signed response before counting it as successful.
+In both audit modes, the WEN accumulates only runtime deltas that its protocol-1.2
+SGX verifier accepted and exports them as a complete start-at-zero audit
+snapshot. The canonical SHA-256 digest of that object is covered by each
+nonce-bound WEN Ed25519 signature. The load generator verifies that signature
+and checks the runtime evidence, binary/ASCII IMA representations, and command
+log against the signed digests before counting a response as successful. In
+`ima-audit`, it additionally rejects any response containing a raw TDX quote;
+in `full-audit`, it requires the quote and verifies its digest and size. The
+legacy `full` alias also carries redundant bare IMA/PCR fields and should not be
+used for new measurements.

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from common import ensure_dir
+from scale_common import ensure_dir
 
 
 def load_rows(path: Path) -> list[dict[str, str]]:
@@ -132,4 +132,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

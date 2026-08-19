@@ -13,7 +13,7 @@ import socket
 import ssl
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,18 @@ from scale_common import ResponseProofSigner, generate_nonce, recv_json, send_js
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SGX_TDX_ROOT = REPO_ROOT / "research" / "sgx-tdx-attestation"
-STREAM_LIMIT_BYTES = 16 * 1024 * 1024
+STREAM_LIMIT_BYTES = 256 * 1024 * 1024
+
+AUDIT_EVIDENCE_MODES = frozenset({"ima-audit", "full-audit", "full"})
+RAW_QUOTE_EVIDENCE_MODES = frozenset({"full-audit", "full"})
+
+
+def is_audit_evidence_mode(mode: str) -> bool:
+    return mode in AUDIT_EVIDENCE_MODES
+
+
+def includes_raw_tdx_quote(mode: str) -> bool:
+    return mode in RAW_QUOTE_EVIDENCE_MODES
 
 
 def ensure_nofile_soft_limit(minimum: int) -> tuple[int, int]:
@@ -99,7 +110,7 @@ class CommandLogSnapshot:
 
     @property
     def sha256(self) -> str:
-        return sha256_hex(self.text.encode("utf-8")) if self.text else ""
+        return sha256_hex(self.text.encode("utf-8"))
 
 
 class NullCommandLogProvider:
@@ -180,7 +191,7 @@ class SyntheticRefreshBackend:
             refresh_count=refresh_count,
             last_refresh_ms=(time.perf_counter() - start) * 1000.0,
         )
-        if self.evidence_mode == "full":
+        if is_audit_evidence_mode(self.evidence_mode):
             quote_bytes = (quote_material * 128)[:4096]
             ima_lines = [
                 f"10 {i:040x} ima-ng sha256:{hashlib.sha256(f'synthetic-{refresh_count}-{i}'.encode('utf-8')).hexdigest()} "
@@ -194,6 +205,7 @@ class SyntheticRefreshBackend:
                 "ima_binary_log_b64": base64.b64encode(ima_log_bytes).decode("ascii"),
                 "ima_ascii_log_b64": base64.b64encode(ima_log_bytes).decode("ascii"),
                 "ima_entry_count": len(ima_lines),
+                "ima_start_index": 0,
                 "synthetic": True,
             }
             runtime_evidence_bytes = json.dumps(
@@ -246,6 +258,9 @@ class SGXVerifierRefreshBackend:
         self.ca_cert = ca_cert
         self.evidence_mode = evidence_mode
         self.command_log_provider = command_log_provider or NullCommandLogProvider()
+        self._audit_binary = b""
+        self._audit_ascii = b""
+        self._audit_entry_count = 0
 
         checkpoint_id = hashlib.sha256(
             f"scalability|{tdx_host}|{tdx_port}|{method}".encode("utf-8")
@@ -263,7 +278,51 @@ class SGXVerifierRefreshBackend:
             verbose=False,
             checkpoint_file=checkpoint_file,
             checkpoint_namespace="scalability-vtpm-1.2",
+            reset_checkpoint=is_audit_evidence_mode(self.evidence_mode),
         )
+
+    def _accumulate_audit_evidence(self, evidence: dict[str, Any]) -> dict[str, Any]:
+        """Build a start-at-zero audit snapshot from verified wire deltas."""
+        start = int(evidence.get("ima_start_index", 0))
+        total = int(evidence.get("ima_entry_count", 0))
+        binary_delta = base64.b64decode(evidence.get("ima_binary_log_b64", ""))
+        ascii_delta = base64.b64decode(evidence.get("ima_ascii_log_b64", ""))
+
+        if start == 0:
+            self._audit_binary = binary_delta
+            self._audit_ascii = ascii_delta
+        elif start == self._audit_entry_count:
+            self._audit_binary += binary_delta
+            self._audit_ascii += ascii_delta
+        else:
+            raise RuntimeError(
+                "verified IMA delta does not continue the WEN audit archive: "
+                f"start={start}, archived={self._audit_entry_count}, total={total}"
+            )
+        self._audit_entry_count = total
+
+        archived = dict(evidence)
+        archived["ima_start_index"] = 0
+        archived["ima_binary_log_b64"] = base64.b64encode(
+            self._audit_binary
+        ).decode("ascii")
+        archived["ima_ascii_log_b64"] = base64.b64encode(
+            self._audit_ascii
+        ).decode("ascii")
+        stream = dict(archived.get("stream", {}))
+        stream.update(
+            {
+                "wire_delta_entries": total,
+                "wire_binary_bytes": len(self._audit_binary),
+                "wire_ascii_bytes": len(self._audit_ascii),
+                "audit_archive": {
+                    "source": "verified-delta-accumulation",
+                    "entry_count": total,
+                },
+            }
+        )
+        archived["stream"] = stream
+        return archived
 
     def refresh(self, refresh_count: int) -> CachedTDXState:
         start = time.perf_counter()
@@ -282,8 +341,13 @@ class SGXVerifierRefreshBackend:
             if runtime_evidence
             else b""
         )
+        include_audit = is_audit_evidence_mode(self.evidence_mode)
+        if include_audit and result.verified and runtime_evidence:
+            runtime_evidence = self._accumulate_audit_evidence(runtime_evidence)
+            runtime_evidence_bytes = json.dumps(
+                runtime_evidence, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
         command_log = self.command_log_provider.snapshot()
-        include_full = self.evidence_mode == "full"
         ima_binary_b64 = runtime_evidence.get("ima_binary_log_b64", "")
         ima_ascii_b64 = runtime_evidence.get("ima_ascii_log_b64", "")
         ima_binary_bytes = base64.b64decode(ima_binary_b64) if ima_binary_b64 else b""
@@ -302,18 +366,18 @@ class SGXVerifierRefreshBackend:
             verification_time=time.time(),
             refresh_count=refresh_count,
             last_refresh_ms=elapsed_ms,
-            raw_quote=raw_quote_b64 if include_full else "",
+            raw_quote=raw_quote_b64 if include_audit else "",
             raw_quote_sha256=sha256_hex(raw_quote_bytes) if raw_quote_bytes else "",
             raw_quote_size=len(raw_quote_bytes),
-            ima_log=ima_ascii_b64 if include_full else "",
+            ima_log=ima_ascii_b64 if include_audit else "",
             ima_log_sha256=sha256_hex(ima_binary_bytes + ima_ascii_bytes) if runtime_evidence else "",
             ima_log_size=len(ima_binary_bytes) + len(ima_ascii_bytes),
-            pcr10=pcr10 if include_full else "",
+            pcr10=pcr10 if include_audit else "",
             pcr10_sha256=sha256_hex(pcr10.encode("utf-8")) if pcr10 else "",
-            runtime_evidence=runtime_evidence if include_full else {},
+            runtime_evidence=runtime_evidence if include_audit else {},
             runtime_evidence_sha256=sha256_hex(runtime_evidence_bytes) if runtime_evidence_bytes else "",
             runtime_evidence_size=len(runtime_evidence_bytes),
-            command_log=command_log.encoded if include_full else "",
+            command_log=command_log.encoded if include_audit else "",
             command_log_sha256=command_log.sha256,
             command_log_size=command_log.size_bytes,
             command_log_entries=command_log.entry_count,
@@ -546,7 +610,9 @@ class VordrServer:
 
     async def _snapshot_state(self) -> CachedTDXState:
         async with self._state_lock:
-            return CachedTDXState(**asdict(self.state))
+            # Refresh replaces the whole state object; it never mutates a published
+            # runtime-evidence dict. Avoid recursively copying a multi-megabyte log.
+            return replace(self.state)
 
     async def _handle_verify(self, request: dict[str, Any]) -> dict[str, Any]:
         self.stats["requests"] += 1
@@ -631,16 +697,19 @@ class VordrServer:
             "proof_signing_ms": proof_signing_ms,
             "server_processing_ms": (time.perf_counter() - start) * 1000.0,
         }
-        if self.evidence_mode == "full":
+        if is_audit_evidence_mode(self.evidence_mode):
             response.update(
                 {
-                    "raw_quote": snapshot.raw_quote,
                     "runtime_evidence": snapshot.runtime_evidence,
-                    "ima_log": snapshot.ima_log,
-                    "pcr10": snapshot.pcr10,
                     "command_log": snapshot.command_log,
                 }
             )
+            if includes_raw_tdx_quote(self.evidence_mode):
+                response["raw_quote"] = snapshot.raw_quote
+            if self.evidence_mode == "full":
+                # Preserve the old wire schema for existing result scripts.
+                response["ima_log"] = snapshot.ima_log
+                response["pcr10"] = snapshot.pcr10
         if snapshot.verified:
             self.stats["served"] += 1
         else:
@@ -803,9 +872,13 @@ def main() -> None:
     parser.add_argument("--controller-id", default="wen-1")
     parser.add_argument(
         "--evidence-mode",
-        choices=["light", "full"],
+        choices=["light", "ima-audit", "full-audit", "full"],
         default="light",
-        help="Whether to return only cached verdict metadata or the full evidence bundle",
+        help=(
+            "light=delegated summary, ima-audit=IMA/vTPM/command evidence without "
+            "the raw TDX quote, full-audit=all evidence including the raw TDX quote; "
+            "full is the legacy full-audit schema"
+        ),
     )
     parser.add_argument(
         "--refresh-backend",
@@ -863,8 +936,8 @@ def main() -> None:
         parser.error("--min-nofile must be positive")
     nofile_soft, nofile_hard = ensure_nofile_soft_limit(args.min_nofile)
 
-    if args.evidence_mode == "full" and not args.command_log_file:
-        parser.error("--command-log-file is required for --evidence-mode full")
+    if is_audit_evidence_mode(args.evidence_mode) and not args.command_log_file:
+        parser.error("--command-log-file is required for audit evidence modes")
 
     command_log_provider: FileCommandLogProvider | NullCommandLogProvider
     if args.command_log_file:
