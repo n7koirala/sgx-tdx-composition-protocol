@@ -336,6 +336,13 @@ class SGXVerifierRefreshBackend:
             else b""
         )
         runtime_evidence = getattr(response, "runtime_evidence", {}) if response else {}
+        if runtime_evidence:
+            runtime_evidence = dict(runtime_evidence)
+            # Preserve the challenge that the enclave already verified so a
+            # Mode-2 auditor can independently check the exported vTPM quote.
+            runtime_evidence["wen_cvm_nonce_b64"] = getattr(
+                response, "nonce_echo", ""
+            )
         runtime_evidence_bytes = (
             json.dumps(runtime_evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
             if runtime_evidence
